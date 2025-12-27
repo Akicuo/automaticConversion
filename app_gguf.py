@@ -120,11 +120,11 @@ class LlamaCppManager:
             if system == "Windows":
                 build_dir = LLAMA_CPP_DIR / "build"
                 build_dir.mkdir(exist_ok=True)
-                subprocess.run(["cmake", ".."], cwd=build_dir, check=True)
+                subprocess.run(["cmake", "..", "-DLLAMA_CURL=OFF"], cwd=build_dir, check=True)
                 subprocess.run(["cmake", "--build", ".", "--config", "Release"], cwd=build_dir, check=True)
                 logger.info("Built with CMake on Windows.")
             else:
-                subprocess.run(["make"], cwd=LLAMA_CPP_DIR, check=True)
+                subprocess.run(["make", "LLAMA_CURL=0"], cwd=LLAMA_CPP_DIR, check=True)
                 logger.info("Built with Make on Linux/Mac.")
         except subprocess.CalledProcessError as e:
             logger.error(f"Build failed: {e}")
