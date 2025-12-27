@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}GGUF Forge{% endblock %}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #050505;
+            --card-bg: rgba(20, 20, 20, 0.4);
+            --text-primary: #ededed;
+            --text-secondary: #888;
+            --accent: #fff;
+            --accent-hover: #ccc;
+            --error: #ff4444;
+            --success: #00cc66;
+            --glass-border: rgba(255, 255, 255, 0.08);
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            margin: 0;
+            padding: 0;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .glass-panel {
+            background: var(--card-bg);
+            border: 1px solid var(--glass-border);
+            border-radius: 8px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+            width: 100%;
+            box-sizing: border-box;
+        }
+
+        header {
+            padding: 1.5rem 0;
+            border-bottom: 1px solid var(--glass-border);
+            background: rgba(5, 5, 5, 0.8);
+            backdrop-filter: blur(8px);
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+
+        header .container {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-top: 0;
+            padding-bottom: 0;
+        }
+
+        h1 {
+            font-size: 1.2rem;
+            font-weight: 500;
+            margin: 0;
+            color: var(--text-primary);
+            letter-spacing: -0.02em;
+        }
+
+        button.primary {
+            background-color: var(--text-primary);
+            color: var(--bg-color);
+            border: none;
+            padding: 0.6rem 1.2rem;
+            border-radius: 6px;
+            font-size: 0.9rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: opacity 0.2s;
+        }
+
+        button.primary:hover {
+            opacity: 0.9;
+            transform: none;
+        }
+
+        input[type="text"],
+        input[type="password"] {
+            background: rgba(15, 23, 42, 0.5);
+            border: 1px solid var(--glass-border);
+            color: var(--text-primary);
+            padding: 0.75rem 1rem;
+            border-radius: 0.5rem;
+            width: 100%;
+            box-sizing: border-box;
+            transition: border-color 0.2s;
+        }
+
+        input[type="text"]:focus,
+        input[type="password"]:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+
+        .status-badge {
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .status-pending {
+            background: rgba(148, 163, 184, 0.2);
+            color: #cbd5e1;
+        }
+
+        .status-processing {
+            background: rgba(59, 130, 246, 0.2);
+            color: #60a5fa;
+        }
+
+        .status-success {
+            background: rgba(16, 185, 129, 0.2);
+            color: #34d399;
+        }
+
+        .status-error {
+            background: rgba(239, 68, 68, 0.2);
+            color: #f87171;
+        }
+    </style>
+    {% block head %}{% endblock %}
+</head>
+
+<body>
+    <header>
+        <div class="container">
+            <h1>GGUF Forge</h1>
+            <nav>
+                {% if user %}
+                <span style="margin-right: 1rem; color: var(--text-secondary); font-size: 0.9rem;">{{ user }}</span>
+                <a href="/logout"
+                    style="color: var(--text-primary); text-decoration: none; font-size: 0.9rem;">Logout</a>
+                {% else %}
+                <a href="/login" style="color: var(--text-primary); text-decoration: none; font-size: 0.9rem;">Login</a>
+                {% endif %}
+            </nav>
+        </div>
+    </header>
+
+    <main class="container">
+        {% block content %}{% endblock %}
+    </main>
+
+    <script>
+        // Common JS utilities
+    </script>
+    {% block scripts %}{% endblock %}
+</body>
+
+</html>

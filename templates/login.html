@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="glass-panel" style="padding: 3rem 2rem; text-align: center; max-width: 320px; margin: 6rem auto;">
+    <h2 style="margin-bottom: 2rem; font-weight: 400; font-size: 1.5rem;">Welcome Back</h2>
+    <form action="/login" method="post">
+        <div style="margin-bottom: 1.5rem; text-align: left;">
+            <input type="text" name="username" required placeholder="Username"
+                style="width: 100%; background: transparent; border: none; border-bottom: 1px solid var(--glass-border); padding: 0.5rem 0; color: var(--text-primary); outline: none;">
+        </div>
+        <div style="margin-bottom: 2.5rem; text-align: left;">
+            <input type="password" name="password" required placeholder="Password"
+                style="width: 100%; background: transparent; border: none; border-bottom: 1px solid var(--glass-border); padding: 0.5rem 0; color: var(--text-primary); outline: none;">
+        </div>
+        <button type="submit" class="primary" style="width: 100%;">Enter</button>
+    </form>
+    {% if error %}
+    <p style="color: var(--error); margin-top: 1.5rem; font-size: 0.9rem;">{{ error }}</p>
+    {% endif %}
+</div>
+{% endblock %}

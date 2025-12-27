@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+jinja2
+python-dotenv
+huggingface_hub
+httpx
+argon2-cffi
+psutil
+aiofiles
+python-multipart

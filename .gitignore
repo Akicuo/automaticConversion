@@ -1,0 +1,7 @@
+pycache
+gguf_app.db
+__pycache__
+.cache
+.env
+venv
+llama.cpp
