@@ -65,6 +65,7 @@ else:
     BUNDLE_DIR = BASE_DIR
 
 TEMPLATES_DIR = BUNDLE_DIR / "templates"
+STATIC_DIR = BUNDLE_DIR / "static"
 CACHE_DIR = BASE_DIR / ".cache"
 LLAMA_CPP_DIR = BASE_DIR / "llama.cpp"
 DB_PATH = BASE_DIR / "gguf_app.db"
@@ -888,6 +889,7 @@ API Key: {key}
     yield
 
 app = FastAPI(lifespan=lifespan)
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 # --- Security Middleware ---

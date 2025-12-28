@@ -5,3 +5,4 @@ __pycache__
 .env
 venv
 llama.cpp
+creds.txt

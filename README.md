@@ -80,6 +80,10 @@ OAUTH_REDIRECT_URI=http://localhost:8000/auth/callback
      - **Redirect URI**: `http://localhost:8000/auth/callback` (or your domain + `/auth/callback`)
      - **Scopes**: Select `openid`, `profile`, `email`
   4. Copy the **Client ID** and **Client Secret**
+
+  ![HuggingFace OAuth Scopes](static/hf-scopes.png)
+  *Ensure 'openid', 'profile', and 'email' are selected*
+
 - **Note**: For production, update `OAUTH_REDIRECT_URI` to your actual domain
 
 ### Example `.env` File
