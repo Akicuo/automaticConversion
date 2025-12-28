@@ -2,6 +2,8 @@
 
 A modern, glassmorphic FastAPI application to automate the conversion of HuggingFace models to GGUF format using `llama.cpp`.
 
+> 🚀 **Don't want to self-host?** Use our free hosted service at **[gguforge.com](https://gguforge.com)** — no setup required! Just login with HuggingFace and request your conversions.
+
 ## Features
 - **HuggingFace OAuth**: Guest login with HuggingFace for requesting conversions
 - **Request System**: Users can request model conversions, admins approve/decline with reasons

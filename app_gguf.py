@@ -86,6 +86,162 @@ OAUTH_AUTHORIZE_URL = "https://huggingface.co/oauth/authorize"
 OAUTH_TOKEN_URL = "https://huggingface.co/oauth/token"
 OAUTH_USERINFO_URL = "https://huggingface.co/oauth/userinfo"
 
+# --- Security: Rate Limiting, Bot Detection, Anti-Spam ---
+
+class RateLimiter:
+    """IP-based rate limiter to prevent DDoS attacks."""
+    def __init__(self, requests_per_minute: int = 60, requests_per_second: int = 10):
+        self.requests_per_minute = requests_per_minute
+        self.requests_per_second = requests_per_second
+        self.requests: dict = {}  # IP -> list of timestamps
+        self.blocked_ips: dict = {}  # IP -> block_until timestamp
+        self.lock = asyncio.Lock()
+    
+    async def is_allowed(self, ip: str) -> tuple[bool, str]:
+        """Check if request from IP is allowed. Returns (allowed, reason)."""
+        import time
+        now = time.time()
+        
+        async with self.lock:
+            # Check if IP is blocked
+            if ip in self.blocked_ips:
+                if now < self.blocked_ips[ip]:
+                    remaining = int(self.blocked_ips[ip] - now)
+                    return False, f"IP blocked for {remaining}s due to rate limit abuse"
+                else:
+                    del self.blocked_ips[ip]
+            
+            # Initialize or clean old requests
+            if ip not in self.requests:
+                self.requests[ip] = []
+            
+            # Remove requests older than 1 minute
+            self.requests[ip] = [t for t in self.requests[ip] if now - t < 60]
+            
+            # Check per-second rate
+            recent_second = sum(1 for t in self.requests[ip] if now - t < 1)
+            if recent_second >= self.requests_per_second:
+                return False, "Too many requests per second"
+            
+            # Check per-minute rate
+            if len(self.requests[ip]) >= self.requests_per_minute:
+                # Block IP for 5 minutes
+                self.blocked_ips[ip] = now + 300
+                logger.warning(f"Rate limit exceeded, blocking IP: {ip}")
+                return False, "Rate limit exceeded. IP blocked for 5 minutes"
+            
+            # Allow request
+            self.requests[ip].append(now)
+            return True, ""
+    
+    async def cleanup(self):
+        """Remove old entries to prevent memory bloat."""
+        import time
+        now = time.time()
+        async with self.lock:
+            # Clean request history
+            for ip in list(self.requests.keys()):
+                self.requests[ip] = [t for t in self.requests[ip] if now - t < 60]
+                if not self.requests[ip]:
+                    del self.requests[ip]
+            # Clean expired blocks
+            for ip in list(self.blocked_ips.keys()):
+                if now >= self.blocked_ips[ip]:
+                    del self.blocked_ips[ip]
+
+
+class BotDetector:
+    """Detect and block suspicious bot traffic."""
+    
+    # Known bot/suspicious user agent patterns
+    SUSPICIOUS_PATTERNS = [
+        "curl", "wget", "python-requests", "scrapy", "bot", "spider",
+        "crawler", "scan", "http", "java/", "perl", "ruby", "go-http",
+        "aiohttp", "httpx", "axios", "node-fetch", "undici"
+    ]
+    
+    # Legitimate browser patterns
+    BROWSER_PATTERNS = ["mozilla", "chrome", "safari", "firefox", "edge", "opera"]
+    
+    @classmethod
+    def is_suspicious(cls, user_agent: str, path: str) -> tuple[bool, str]:
+        """Check if request appears to be from a bot. Returns (is_bot, reason)."""
+        if not user_agent:
+            return True, "Missing User-Agent header"
+        
+        ua_lower = user_agent.lower()
+        
+        # Skip check for API endpoints that might legitimately use non-browser clients
+        if path.startswith("/api/"):
+            return False, ""
+        
+        # Check for suspicious patterns
+        for pattern in cls.SUSPICIOUS_PATTERNS:
+            if pattern in ua_lower:
+                return True, f"Suspicious User-Agent pattern: {pattern}"
+        
+        # For non-API routes, require browser-like user agent
+        has_browser = any(pattern in ua_lower for pattern in cls.BROWSER_PATTERNS)
+        if not has_browser and not path.startswith("/api/"):
+            return True, "Non-browser User-Agent for browser route"
+        
+        return False, ""
+
+
+class SpamProtection:
+    """Prevent spam submissions (model requests, etc.)."""
+    
+    def __init__(self, max_requests_per_hour: int = 10, max_pending_per_user: int = 5):
+        self.max_requests_per_hour = max_requests_per_hour
+        self.max_pending_per_user = max_pending_per_user
+        self.submissions: dict = {}  # user -> list of timestamps
+        self.lock = asyncio.Lock()
+    
+    async def can_submit(self, username: str) -> tuple[bool, str]:
+        """Check if user can submit a new request."""
+        import time
+        now = time.time()
+        
+        async with self.lock:
+            if username not in self.submissions:
+                self.submissions[username] = []
+            
+            # Remove submissions older than 1 hour
+            self.submissions[username] = [t for t in self.submissions[username] if now - t < 3600]
+            
+            if len(self.submissions[username]) >= self.max_requests_per_hour:
+                return False, f"Request limit reached ({self.max_requests_per_hour}/hour). Please try again later."
+            
+            return True, ""
+    
+    async def record_submission(self, username: str):
+        """Record a new submission."""
+        import time
+        async with self.lock:
+            if username not in self.submissions:
+                self.submissions[username] = []
+            self.submissions[username].append(time.time())
+    
+    def check_pending_limit(self, username: str) -> tuple[bool, str]:
+        """Check if user has too many pending requests (sync DB check)."""
+        conn = get_db_connection()
+        count = conn.execute(
+            "SELECT COUNT(*) FROM requests WHERE requested_by = ? AND status = 'pending'",
+            (username,)
+        ).fetchone()[0]
+        conn.close()
+        
+        if count >= self.max_pending_per_user:
+            return False, f"Too many pending requests ({count}/{self.max_pending_per_user}). Wait for approval."
+        return True, ""
+
+
+# Initialize security instances
+rate_limiter = RateLimiter(requests_per_minute=120, requests_per_second=15)
+bot_detector = BotDetector()
+spam_protection = SpamProtection(max_requests_per_hour=10, max_pending_per_user=5)
+
+
 # Database Setup
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -642,15 +798,22 @@ The following quants are available:
 ### Step Breakdown
 {timing_section}
 
+## 🚀 Convert Your Own Models
+
+**Want to convert more models to GGUF?**
+
+👉 **[gguforge.com](https://gguforge.com)** — Free hosted GGUF conversion service. Login with HuggingFace and request conversions instantly!
+
 ## Links
 
- - Host your own GGUF Forge (Beta): [GGUF Forge](https://github.com/Akicuo/automaticConversion)
- - llama.cpp Repository used for quantization: [llama.cpp](https://github.com/ggerganov/llama.cpp)
- - Request Conversion (Beta): [GGUF Community](https://discord.gg/4vafUgVX3a)
+ - 🌐 **Free Hosted Service**: [gguforge.com](https://gguforge.com)
+ - 🛠️ Self-host GGUF Forge: [GitHub](https://github.com/Akicuo/automaticConversion)
+ - 📦 llama.cpp (quantization engine): [GitHub](https://github.com/ggerganov/llama.cpp)
+ - 💬 Community & Support: [Discord](https://discord.gg/4vafUgVX3a)
 
 
-### Automatic Conversion by GGUF Forge
-
+---
+*Converted automatically by [GGUF Forge](https://gguforge.com) {get_app_version()}*
 
 """
                 api.upload_file(
@@ -726,6 +889,49 @@ API Key: {key}
 
 app = FastAPI(lifespan=lifespan)
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+
+# --- Security Middleware ---
+@app.middleware("http")
+async def security_middleware(request: Request, call_next):
+    """Apply rate limiting and bot detection to all requests."""
+    # Get client IP (handle proxies)
+    forwarded_for = request.headers.get("X-Forwarded-For")
+    if forwarded_for:
+        client_ip = forwarded_for.split(",")[0].strip()
+    else:
+        client_ip = request.client.host if request.client else "unknown"
+    
+    path = request.url.path
+    
+    # Skip security checks for static files
+    if path.startswith("/static"):
+        return await call_next(request)
+    
+    # Skip rate limiting for frequent polling endpoints (already filtered from logs)
+    skip_rate_limit = path in ["/api/status/all", "/api/requests/all", "/api/requests/my"]
+    
+    # Rate limiting check (skip for polling endpoints to avoid false positives)
+    if not skip_rate_limit:
+        allowed, reason = await rate_limiter.is_allowed(client_ip)
+        if not allowed:
+            logger.warning(f"Rate limit: {client_ip} - {path} - {reason}")
+            return JSONResponse(
+                status_code=429,
+                content={"detail": reason}
+            )
+    
+    # Bot detection for non-API routes
+    user_agent = request.headers.get("User-Agent", "")
+    is_bot, bot_reason = bot_detector.is_suspicious(user_agent, path)
+    if is_bot and not path.startswith("/api/"):
+        logger.warning(f"Bot detected: {client_ip} - {user_agent[:50]} - {bot_reason}")
+        return JSONResponse(
+            status_code=403,
+            content={"detail": "Access denied"}
+        )
+    
+    return await call_next(request)
+
 
 # Models for API
 class LoginRequest(BaseModel):
@@ -960,9 +1166,24 @@ async def get_model_status(model_id: str):
 # --- Request System ---
 @app.post("/api/requests/submit")
 async def submit_request(req: ModelRequestSubmit, request: Request):
-    """Anyone can submit a request for a model to be converted."""
+    """Submit a request for a model to be converted (requires login)."""
     user = get_current_user(request)
-    requester = user['username'] if user else "anonymous"
+    
+    # Require login for submissions (anti-spam)
+    if not user:
+        raise HTTPException(status_code=401, detail="Login required to submit requests")
+    
+    requester = user['username']
+    
+    # Check spam protection - pending limit
+    allowed, reason = spam_protection.check_pending_limit(requester)
+    if not allowed:
+        raise HTTPException(status_code=429, detail=reason)
+    
+    # Check spam protection - hourly rate
+    allowed, reason = await spam_protection.can_submit(requester)
+    if not allowed:
+        raise HTTPException(status_code=429, detail=reason)
     
     conn = get_db_connection()
     # Check if already requested
@@ -977,6 +1198,10 @@ async def submit_request(req: ModelRequestSubmit, request: Request):
     )
     conn.commit()
     conn.close()
+    
+    # Record submission for rate limiting
+    await spam_protection.record_submission(requester)
+    
     return {"status": "submitted", "message": "Your request has been submitted for admin review."}
 
 @app.get("/api/requests/all")
