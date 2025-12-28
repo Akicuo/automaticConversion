@@ -274,16 +274,23 @@ class ModelWorkflow:
             self.log("Starting quantization loop...")
             quant_base_name = self.hf_repo_id.split("/")[-1]
             hf_token = os.getenv("HF_TOKEN")
-            new_repo_id = f"{self.hf_repo_id}-GGUF"
+            
+            # Get current user's HuggingFace username to create repo under their account
+            api = HfApi(token=hf_token)
+            new_repo_id = None
             
             if hf_token:
                 try:
+                    user_info = api.whoami()
+                    hf_username = user_info.get("name") or user_info.get("user")
+                    new_repo_id = f"{hf_username}/{quant_base_name}-GGUF"
+                    self.log(f"Will upload to: {new_repo_id}")
                     create_repo(new_repo_id, repo_type="model", token=hf_token, exist_ok=True)
                     self.log(f"Created/Found repo {new_repo_id}")
                 except Exception as e:
                     self.log(f"Could not create repo: {e}. Upload might fail.")
+                    new_repo_id = None
 
-            api = HfApi(token=hf_token)
             uploaded_files = []
             
             total_quants = len(QUANTS)

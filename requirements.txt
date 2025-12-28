@@ -8,3 +8,9 @@ argon2-cffi
 psutil
 aiofiles
 python-multipart
+transformers
+sentencepiece
+hf_xet
+hf_transfer
+huggingface_hub
+sentencepiece
