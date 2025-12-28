@@ -306,8 +306,26 @@ def get_db_connection():
 class LlamaCppManager:
     @staticmethod
     def is_installed() -> bool:
-        return (LLAMA_CPP_DIR / "Makefile").exists() or (LLAMA_CPP_DIR / "CMakeLists.txt").exists()
-
+        return (LLAMA_CPP_DIR / "CMakeLists.txt").exists()
+    
+    @staticmethod
+    def check_tool(tool_name: str) -> bool:
+        """Check if a tool is available in PATH."""
+        return shutil.which(tool_name) is not None
+    
+    @staticmethod
+    def has_nvidia_gpu() -> bool:
+        """Check if NVIDIA GPU is available."""
+        try:
+            result = subprocess.run(
+                ["nvidia-smi"],
+                capture_output=True,
+                text=True
+            )
+            return result.returncode == 0
+        except FileNotFoundError:
+            return False
+    
     @staticmethod
     async def clone_repo():
         if LlamaCppManager.is_installed():
@@ -332,67 +350,138 @@ class LlamaCppManager:
 
     @staticmethod
     async def build():
+        """Build llama.cpp using CMake with optional CUDA support."""
         logger.info("Building llama.cpp...")
         system = platform.system()
         
+        # Check if cmake is available
+        if not LlamaCppManager.check_tool("cmake"):
+            raise Exception("CMake is not installed or not in PATH. Please install CMake.")
+        
+        # Check for CUDA support
+        has_cuda = LlamaCppManager.has_nvidia_gpu()
+        if has_cuda:
+            logger.info("NVIDIA GPU detected, building with CUDA support...")
+        else:
+            logger.info("No NVIDIA GPU detected, building CPU-only version...")
+        
+        build_dir = LLAMA_CPP_DIR / "build"
+        build_dir.mkdir(exist_ok=True)
+        
         try:
+            # Step 1: CMake Configure
+            cmake_args = [
+                "cmake", "..",
+                "-DLLAMA_CURL=OFF",
+                "-DCMAKE_BUILD_TYPE=Release"
+            ]
+            
+            # Add CUDA flag if available
+            if has_cuda:
+                cmake_args.append("-DGGML_CUDA=ON")
+            
+            # Windows-specific: use Release config
             if system == "Windows":
-                build_dir = LLAMA_CPP_DIR / "build"
-                build_dir.mkdir(exist_ok=True)
-                proc = await asyncio.create_subprocess_exec(
-                    "cmake", "..", "-DLLAMA_CURL=OFF",
-                    cwd=build_dir,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                returncode = await proc.wait()
-                if returncode != 0:
-                    raise Exception("CMake configure failed")
-                
-                proc = await asyncio.create_subprocess_exec(
-                    "cmake", "--build", ".", "--config", "Release",
-                    cwd=build_dir,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                returncode = await proc.wait()
-                if returncode != 0:
-                    raise Exception("CMake build failed")
-                logger.info("Built with CMake on Windows.")
+                # Try to detect Visual Studio
+                cmake_args.extend(["-A", "x64"])
+            
+            logger.info(f"Running CMake configure: {' '.join(cmake_args)}")
+            
+            proc = await asyncio.create_subprocess_exec(
+                *cmake_args,
+                cwd=build_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT
+            )
+            stdout, _ = await proc.communicate()
+            
+            if proc.returncode != 0:
+                error_output = stdout.decode() if stdout else "No output"
+                logger.error(f"CMake configure failed:\n{error_output}")
+                raise Exception(f"CMake configure failed. Output:\n{error_output[:2000]}")
+            
+            logger.info("CMake configure successful")
+            
+            # Step 2: CMake Build
+            build_args = ["cmake", "--build", ".", "--config", "Release"]
+            
+            # Use multiple cores for faster builds
+            if system != "Windows":
+                import multiprocessing
+                cores = multiprocessing.cpu_count()
+                build_args.extend(["-j", str(cores)])
             else:
-                proc = await asyncio.create_subprocess_exec(
-                    "make", "LLAMA_CURL=0",
-                    cwd=LLAMA_CPP_DIR,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                returncode = await proc.wait()
-                if returncode != 0:
-                    raise Exception("Make build failed")
-                logger.info("Built with Make on Linux/Mac.")
+                build_args.extend(["--", "/m"])  # Parallel build for MSBuild
+            
+            logger.info(f"Running CMake build: {' '.join(build_args)}")
+            
+            proc = await asyncio.create_subprocess_exec(
+                *build_args,
+                cwd=build_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT
+            )
+            stdout, _ = await proc.communicate()
+            
+            if proc.returncode != 0:
+                error_output = stdout.decode() if stdout else "No output"
+                logger.error(f"CMake build failed:\n{error_output}")
+                raise Exception(f"CMake build failed. Output:\n{error_output[:2000]}")
+            
+            cuda_status = "with CUDA" if has_cuda else "CPU-only"
+            logger.info(f"Build successful ({cuda_status}) on {system}")
+            
         except Exception as e:
             logger.error(f"Build failed: {e}")
-            raise Exception("Failed to build llama.cpp. Ensure build tools (CMake/Visual Studio/Make) are installed.")
+            raise Exception(
+                f"Failed to build llama.cpp: {str(e)}\n"
+                "Ensure build tools are installed:\n"
+                "  - Windows: Visual Studio Build Tools + CMake\n"
+                "  - Linux: build-essential, cmake, (nvidia-cuda-toolkit for GPU)"
+            )
 
     @staticmethod
     def get_quantize_path() -> Path:
+        """Find the llama-quantize executable."""
         system = platform.system()
+        build_dir = LLAMA_CPP_DIR / "build"
+        
+        # Common paths based on CMake output
         if system == "Windows":
-            paths = [
-                LLAMA_CPP_DIR / "build" / "bin" / "Release" / "llama-quantize.exe",
-                LLAMA_CPP_DIR / "build" / "Release" / "llama-quantize.exe",
-                LLAMA_CPP_DIR / "llama-quantize.exe"
+            candidates = [
+                build_dir / "bin" / "Release" / "llama-quantize.exe",
+                build_dir / "Release" / "llama-quantize.exe",
+                build_dir / "bin" / "llama-quantize.exe",
+                LLAMA_CPP_DIR / "build" / "llama-quantize.exe",
             ]
-            for p in paths:
-                if p.exists(): return p
         else:
-            if (LLAMA_CPP_DIR / "llama-quantize").exists():
-                return LLAMA_CPP_DIR / "llama-quantize"
+            candidates = [
+                build_dir / "bin" / "llama-quantize",
+                build_dir / "llama-quantize",
+                LLAMA_CPP_DIR / "llama-quantize",
+            ]
         
-        found = list(LLAMA_CPP_DIR.rglob("llama-quantize*"))
-        if found: return found[0]
+        for path in candidates:
+            if path.exists():
+                logger.info(f"Found llama-quantize at: {path}")
+                return path
         
-        raise FileNotFoundError("llama-quantize executable not found. Build might have failed.")
+        # Fallback: recursive search
+        pattern = "llama-quantize.exe" if system == "Windows" else "llama-quantize"
+        found = list(LLAMA_CPP_DIR.rglob(pattern))
+        if found:
+            # Prefer executables in build directories
+            for f in found:
+                if "build" in str(f):
+                    logger.info(f"Found llama-quantize at: {f}")
+                    return f
+            logger.info(f"Found llama-quantize at: {found[0]}")
+            return found[0]
+        
+        raise FileNotFoundError(
+            "llama-quantize executable not found. Build might have failed.\n"
+            f"Searched in: {LLAMA_CPP_DIR}"
+        )
 
 class HuggingFaceManager:
     def __init__(self, token: Optional[str] = None):
