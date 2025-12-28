@@ -388,7 +388,17 @@ This model was converted to GGUF format from [`{self.hf_repo_id}`](https://huggi
 The following quants are available:
 {', '.join(uploaded_files)}
 
+
+## Links
+
+ - Host your own GGUF Forge (Beta): [GGUF Forge](https://github.com/Akicuo/automaticConversion)
+ - llama.cpp Repository used for quantization: [llama.cpp](https://github.com/ggerganov/llama.cpp)
+ - Request Conversion (Beta): [GGUF Community](https://discord.gg/4vafUgVX3a)
+
+
 ### Automatic Conversion by GGUF Forge
+
+
 """
                 api.upload_file(
                     path_or_fileobj=readme_content.encode('utf-8'),
