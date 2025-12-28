@@ -239,81 +239,93 @@
         const container = document.getElementById('models-list');
         const template = document.getElementById('model-card-template');
 
-        // Save current scroll positions before update
-        container.querySelectorAll('.model-card').forEach(card => {
-            const modelId = card.dataset.modelId;
-            const logs = card.querySelector('.logs');
-            if (modelId && logs) {
-                // Check if user has scrolled up (not at bottom)
-                const isAtBottom = logs.scrollHeight - logs.scrollTop <= logs.clientHeight + 50;
-                logScrollPositions[modelId] = {
-                    scrollTop: logs.scrollTop,
-                    wasAtBottom: isAtBottom
-                };
-            }
-        });
-
-        container.innerHTML = '';
-
-        if (models.length === 0) {
+        if (!models || models.length === 0) {
             container.innerHTML = '<div style="text-align: center; color: var(--text-secondary); padding: 2rem; border: 1px dashed var(--glass-border); border-radius: 8px;">No active conversions.</div>';
             return;
         }
 
+        // Clean up empty state message if present
+        const emptyMsg = container.querySelector('div[style*="text-align: center"]');
+        if (emptyMsg) emptyMsg.remove();
+
+        // 1. Mark all existing cards as stale initially
+        const existingCards = new Map();
+        container.querySelectorAll('.model-card').forEach(card => {
+            existingCards.set(card.dataset.modelId, card);
+        });
+
+        // 2. Process models
         models.forEach(model => {
-            const clone = template.content.cloneNode(true);
-            const card = clone.querySelector('.model-card');
+            let card = existingCards.get(model.id);
+            let logsEl;
+            let shouldAutoScroll = true;
 
-            // Set model ID for tracking
-            card.dataset.modelId = model.id;
+            if (card) {
+                // Remove from stale list (it's active)
+                existingCards.delete(model.id);
 
-            clone.querySelector('.model-name').textContent = model.hf_repo_id;
+                logsEl = card.querySelector('.logs');
+                // Check if user is at bottom BEFORE update
+                const tolerance = 50; // pixels
+                shouldAutoScroll = (logsEl.scrollHeight - logsEl.scrollTop - logsEl.clientHeight) <= tolerance;
+            } else {
+                // Create new card
+                const clone = template.content.cloneNode(true);
+                card = clone.querySelector('.model-card');
+                card.dataset.modelId = model.id;
+                container.appendChild(clone);
+                logsEl = card.querySelector('.logs');
+            }
 
-            const badge = clone.querySelector('.status-badge');
+            // Update content
+            card.querySelector('.model-name').textContent = model.hf_repo_id;
+
+            const badge = card.querySelector('.status-badge');
             badge.textContent = model.status.toUpperCase();
 
-            if (model.status === 'error') {
-                badge.style.color = 'var(--error)';
-            } else if (model.status === 'complete') {
-                badge.style.color = 'var(--success)';
+            if (model.status === 'error') badge.style.color = 'var(--error)';
+            else if (model.status === 'complete') badge.style.color = 'var(--success)';
+            else badge.style.color = ''; // Default color
+
+            // Progress
+            card.querySelector('.progress-bar-fill').style.width = `${model.progress}%`;
+
+            // Logs
+            if (logsEl.textContent !== model.log) {
+                logsEl.textContent = model.log;
+                if (shouldAutoScroll) {
+                    logsEl.scrollTop = logsEl.scrollHeight;
+                }
             }
 
-            clone.querySelector('.progress-bar-fill').style.width = `${model.progress}%`;
-
-            const logs = clone.querySelector('.logs');
-            logs.textContent = model.log;
-
-            // Restore scroll position or scroll to bottom for new content
-            const savedPos = logScrollPositions[model.id];
-            if (savedPos) {
-                if (savedPos.wasAtBottom) {
-                    // User was at bottom, keep them there (auto-scroll)
-                    logs.scrollTop = logs.scrollHeight;
-                } else {
-                    // User had scrolled up, preserve their position
-                    logs.scrollTop = savedPos.scrollTop;
+            // Error details
+            const errorSection = card.querySelector('.error-section');
+            if (model.error_details) {
+                errorSection.style.display = 'block';
+                if (errorSection.textContent !== model.error_details.slice(0, 500)) {
+                    errorSection.textContent = model.error_details.slice(0, 500);
                 }
             } else {
-                // New model, scroll to bottom
-                logs.scrollTop = logs.scrollHeight;
+                errorSection.style.display = 'none';
             }
 
-            // Show error details if present
-            if (model.error_details) {
-                const errorSection = clone.querySelector('.error-section');
-                errorSection.style.display = 'block';
-                errorSection.textContent = model.error_details.slice(0, 500);
-            }
+            // Delete button setup
+            if (isAdmin) {
+                const deleteBtn = card.querySelector('.delete-btn');
 
-            // Show delete button for admin on error or complete status
-            if (isAdmin && (model.status === 'error' || model.status === 'complete')) {
-                const deleteBtn = clone.querySelector('.delete-btn');
-                deleteBtn.style.display = 'inline-block';
+                // Update click handler (in case name changed, though unlikely)
                 deleteBtn.onclick = () => deleteModel(model.id, model.hf_repo_id);
-            }
 
-            container.appendChild(clone);
+                if (model.status === 'error' || model.status === 'complete') {
+                    deleteBtn.style.display = 'inline-block';
+                } else {
+                    deleteBtn.style.display = 'none';
+                }
+            }
         });
+
+        // 3. Remove stale cards
+        existingCards.forEach(card => card.remove());
     }
 
     async function deleteModel(modelId, modelName) {
