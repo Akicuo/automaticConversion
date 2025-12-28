@@ -45,6 +45,19 @@
     </div>
     {% endif %}
 
+    <!-- My Requests (Visible to logged-in users) -->
+    {% if user and role != 'admin' %}
+    <div style="margin-bottom: 3rem;">
+        <h2 style="font-weight: 400; font-size: 1.2rem; margin-bottom: 1.5rem; color: var(--text-secondary);">My
+            Requests</h2>
+        <div id="my-requests-list" style="display: grid; gap: 0.75rem;">
+            <div
+                style="text-align: center; color: var(--text-secondary); padding: 1.5rem; border: 1px dashed var(--glass-border); border-radius: 8px; font-size: 0.9rem;">
+                Loading...</div>
+        </div>
+    </div>
+    {% endif %}
+
     <!-- Status Board -->
     <div>
         <h2 style="font-weight: 400; font-size: 1.2rem; margin-bottom: 1.5rem; color: var(--text-secondary);">Conversion
@@ -79,18 +92,35 @@
 </template>
 
 <template id="request-card-template">
-    <div class="request-card glass-panel"
-        style="padding: 1rem; display: flex; justify-content: space-between; align-items: center;">
-        <div>
-            <span class="request-model" style="font-weight: 500;"></span>
-            <span class="request-by"
-                style="color: var(--text-secondary); font-size: 0.85rem; margin-left: 0.5rem;"></span>
+    <div class="request-card glass-panel" style="padding: 1rem;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
+            <div>
+                <span class="request-model" style="font-weight: 500;"></span>
+                <span class="request-by"
+                    style="color: var(--text-secondary); font-size: 0.85rem; margin-left: 0.5rem;"></span>
+            </div>
+            <div style="display: flex; gap: 0.5rem; align-items: center;">
+                <button class="approve-btn"
+                    style="background: var(--success); color: #000; border: none; padding: 0.4rem 0.8rem; border-radius: 4px; cursor: pointer; font-size: 0.85rem;">Approve</button>
+                <button class="reject-btn"
+                    style="background: transparent; color: var(--error); border: 1px solid var(--error); padding: 0.4rem 0.8rem; border-radius: 4px; cursor: pointer; font-size: 0.85rem;">Reject</button>
+            </div>
         </div>
-        <div style="display: flex; gap: 0.5rem;">
-            <button class="approve-btn"
-                style="background: var(--success); color: #000; border: none; padding: 0.4rem 0.8rem; border-radius: 4px; cursor: pointer; font-size: 0.85rem;">Approve</button>
-            <button class="reject-btn"
-                style="background: transparent; color: var(--error); border: 1px solid var(--error); padding: 0.4rem 0.8rem; border-radius: 4px; cursor: pointer; font-size: 0.85rem;">Reject</button>
+        <div class="decline-reason-row" style="display: flex; gap: 0.5rem; align-items: center;">
+            <input type="text" class="decline-reason-input" placeholder="Decline reason (optional)..."
+                style="flex: 1; background: rgba(255,255,255,0.05); border: 1px solid var(--glass-border); padding: 0.5rem; border-radius: 4px; color: var(--text-primary); font-size: 0.85rem;">
+        </div>
+    </div>
+</template>
+
+<template id="my-request-card-template">
+    <div class="my-request-card glass-panel" style="padding: 1rem;">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span class="request-model" style="font-weight: 500;"></span>
+            <span class="request-status" style="font-family: monospace; font-size: 0.75rem;"></span>
+        </div>
+        <div class="decline-reason"
+            style="display: none; margin-top: 0.75rem; padding: 0.75rem; background: rgba(255,68,68,0.1); border-radius: 4px; font-size: 0.85rem; color: var(--error);">
         </div>
     </div>
 </template>
@@ -272,9 +302,12 @@
 
         requests.forEach(req => {
             const clone = template.content.cloneNode(true);
+            const card = clone.querySelector('.request-card');
 
             clone.querySelector('.request-model').textContent = req.hf_repo_id;
             clone.querySelector('.request-by').textContent = `by ${req.requested_by}`;
+
+            const declineInput = clone.querySelector('.decline-reason-input');
 
             clone.querySelector('.approve-btn').onclick = async () => {
                 await fetch(`/api/requests/${req.id}/approve`, { method: 'POST' });
@@ -283,7 +316,12 @@
             };
 
             clone.querySelector('.reject-btn').onclick = async () => {
-                await fetch(`/api/requests/${req.id}/reject`, { method: 'POST' });
+                const reason = declineInput ? declineInput.value : '';
+                await fetch(`/api/requests/${req.id}/reject`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ reason: reason })
+                });
                 fetchRequests();
             };
 
@@ -291,9 +329,73 @@
         });
     }
 
+    // My Requests (For logged-in users)
+    const isLoggedIn = '{{ user }}' !== 'None' && '{{ user }}' !== '';
+
+    async function fetchMyRequests() {
+        if (isAdmin || !isLoggedIn) return;
+        const container = document.getElementById('my-requests-list');
+        if (!container) return;
+
+        try {
+            const res = await fetch('/api/requests/my');
+            if (!res.ok) {
+                container.innerHTML = '<div style="text-align: center; color: var(--text-secondary); padding: 1.5rem; border: 1px dashed var(--glass-border); border-radius: 8px; font-size: 0.9rem;">No requests yet.</div>';
+                return;
+            }
+            const requests = await res.json();
+            renderMyRequests(requests);
+        } catch (e) {
+            console.error(e);
+            container.innerHTML = '<div style="text-align: center; color: var(--text-secondary); padding: 1.5rem; border: 1px dashed var(--glass-border); border-radius: 8px; font-size: 0.9rem;">No requests yet.</div>';
+        }
+    }
+
+    function renderMyRequests(requests) {
+        const container = document.getElementById('my-requests-list');
+        if (!container) return;
+
+        const template = document.getElementById('my-request-card-template');
+
+        container.innerHTML = '';
+
+        if (requests.length === 0) {
+            container.innerHTML = '<div style="text-align: center; color: var(--text-secondary); padding: 1.5rem; border: 1px dashed var(--glass-border); border-radius: 8px; font-size: 0.9rem;">No requests yet.</div>';
+            return;
+        }
+
+        requests.forEach(req => {
+            const clone = template.content.cloneNode(true);
+
+            clone.querySelector('.request-model').textContent = req.hf_repo_id;
+
+            const statusBadge = clone.querySelector('.request-status');
+            statusBadge.textContent = req.status.toUpperCase();
+
+            if (req.status === 'approved') {
+                statusBadge.style.color = 'var(--success)';
+            } else if (req.status === 'rejected') {
+                statusBadge.style.color = 'var(--error)';
+            } else {
+                statusBadge.style.color = 'var(--text-secondary)';
+            }
+
+            // Show decline reason if rejected
+            if (req.status === 'rejected' && req.decline_reason) {
+                const declineDiv = clone.querySelector('.decline-reason');
+                declineDiv.style.display = 'block';
+                declineDiv.innerHTML = '<strong>Reason:</strong> ' + req.decline_reason;
+            }
+
+            container.appendChild(clone);
+        });
+    }
+
     setInterval(fetchStatus, 2000);
     setInterval(fetchRequests, 5000);
+    setInterval(fetchMyRequests, 5000);
     fetchStatus();
     fetchRequests();
+    fetchMyRequests();
 </script>
 {% endblock %}
