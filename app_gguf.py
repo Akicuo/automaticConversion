@@ -177,7 +177,8 @@ class ModelWorkflow:
     def log(self, message: str):
         print(f"[{self.hf_repo_id}] {message}")
         self.log_buffer.append(message)
-        self._update_db(log="\n".join(self.log_buffer)[-4000:])
+        # Keep last 8k chars for better visibility in UI
+        self._update_db(log="\n".join(self.log_buffer)[-8000:])
 
     def progress(self, percent: int):
         self._update_db(progress=percent)
@@ -197,9 +198,30 @@ class ModelWorkflow:
 
     def check_disk_space(self, required_gb: float):
         total, used, free = shutil.disk_usage(BASE_DIR)
-        free_gb = free // (2**30)
+        free_gb = free / (2**30)
+        self.log(f"  Disk space check: Need {required_gb:.1f}GB, Available {free_gb:.1f}GB")
         if free_gb < required_gb:
-            raise Exception(f"Insufficient disk space. Required: {required_gb}GB, Available: {free_gb}GB")
+            raise Exception(f"Insufficient disk space. Required: {required_gb:.1f}GB, Available: {free_gb:.1f}GB")
+        self.log(f"  ✓ Sufficient disk space")
+
+    def get_model_size_gb(self) -> float:
+        """Get model size from HuggingFace API in GB."""
+        try:
+            hf_token = os.getenv("HF_TOKEN")
+            api = HfApi(token=hf_token)
+            model_info = api.model_info(self.hf_repo_id, files_metadata=True)
+            
+            total_bytes = 0
+            if model_info.siblings:
+                for sibling in model_info.siblings:
+                    if hasattr(sibling, 'size') and sibling.size:
+                        total_bytes += sibling.size
+            
+            size_gb = total_bytes / (2**30)
+            return size_gb
+        except Exception as e:
+            self.log(f"  ⚠ Could not fetch model size: {e}")
+            return 10.0  # Default fallback
 
     def cleanup(self):
         """Remove all downloaded and generated files."""
@@ -230,48 +252,66 @@ class ModelWorkflow:
         try:
             self.status("initializing")
             self.progress(0)
+            self.log("━━━ GGUF Forge Pipeline Started ━━━")
+            self.log(f"Model: {self.hf_repo_id}")
+            self.log("")
             
             # 1. Setup Llama
-            self.log("Checking llama.cpp installation...")
+            self.log("▶ STEP 1: Setting up llama.cpp...")
+            self.log("  Checking llama.cpp installation...")
             LlamaCppManager.clone_repo()
+            self.log("  Building llama.cpp (this may take a while)...")
             LlamaCppManager.build()
             quantize_bin = LlamaCppManager.get_quantize_path()
-            self.log(f"llama-quantize found at: {quantize_bin}")
+            self.log(f"  ✓ llama-quantize ready: {quantize_bin.name}")
             self.progress(10)
+            self.log("")
 
             # 2. Download
             self.status("downloading")
-            self.log(f"Downloading {self.hf_repo_id}...")
-            self.check_disk_space(20) 
+            self.log("▶ STEP 2: Downloading model from HuggingFace...")
+            self.log(f"  Source: https://huggingface.co/{self.hf_repo_id}")
+            
+            # Get actual model size and calculate required space
+            model_size_gb = self.get_model_size_gb()
+            self.log(f"  Model size: {model_size_gb:.2f}GB")
+            # Need: original model + FP16 GGUF (~same size) + quants (~0.5x each, 12 quants)
+            # Conservative estimate: model_size * 3 (original + fp16 + some quants at a time)
+            required_gb = max(5.0, model_size_gb * 3)
+            self.check_disk_space(required_gb) 
             
             self.model_dir = snapshot_download(
                 repo_id=self.hf_repo_id, 
                 local_dir=CACHE_DIR / self.hf_repo_id, 
                 local_dir_use_symlinks=False
             )
-            self.log(f"Downloaded to {self.model_dir}")
+            self.log(f"  ✓ Downloaded to {self.model_dir}")
             self.progress(30)
+            self.log("")
 
             # 3. Convert to FP16
             self.status("converting")
-            self.log("Converting to GGUF (FP16)...")
+            self.log("▶ STEP 3: Converting to GGUF format (FP16)...")
             convert_script = LLAMA_CPP_DIR / "convert_hf_to_gguf.py"
             self.fp16_path = CACHE_DIR / f"{self.hf_repo_id.replace('/', '-')}-f16.gguf"
             
             cmd = [sys.executable, str(convert_script), str(self.model_dir), "--outfile", str(self.fp16_path), "--outtype", "f16"]
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             for line in process.stdout:
-                self.log(line.strip())
+                if line.strip():
+                    self.log(f"  {line.strip()}")
             process.wait()
             
             if process.returncode != 0:
                 raise Exception("Conversion to GGUF failed. Check logs for details.")
             
+            self.log(f"  ✓ FP16 conversion complete: {self.fp16_path.name}")
             self.progress(50)
+            self.log("")
 
             # 4. Quantize
             self.status("quantizing")
-            self.log("Starting quantization loop...")
+            self.log("▶ STEP 4: Quantizing to all formats...")
             quant_base_name = self.hf_repo_id.split("/")[-1]
             hf_token = os.getenv("HF_TOKEN")
             
@@ -284,18 +324,21 @@ class ModelWorkflow:
                     user_info = api.whoami()
                     hf_username = user_info.get("name") or user_info.get("user")
                     new_repo_id = f"{hf_username}/{quant_base_name}-GGUF"
-                    self.log(f"Will upload to: {new_repo_id}")
+                    self.log(f"  Target repo: {new_repo_id}")
                     create_repo(new_repo_id, repo_type="model", token=hf_token, exist_ok=True)
-                    self.log(f"Created/Found repo {new_repo_id}")
+                    self.log(f"  ✓ Repo ready: https://huggingface.co/{new_repo_id}")
                 except Exception as e:
-                    self.log(f"Could not create repo: {e}. Upload might fail.")
+                    self.log(f"  ⚠ Could not create repo: {e}")
                     new_repo_id = None
+            else:
+                self.log("  ⚠ No HF_TOKEN set - files will be quantized but not uploaded")
 
+            self.log("")
             uploaded_files = []
             
             total_quants = len(QUANTS)
             for idx, q_type in enumerate(QUANTS):
-                self.log(f"Quantizing {q_type}...")
+                self.log(f"  [{idx+1}/{total_quants}] Quantizing {q_type}...")
                 q_path = CACHE_DIR / f"{quant_base_name}.{q_type}.gguf"
                 self.quant_paths.append(q_path)
                 
@@ -303,12 +346,12 @@ class ModelWorkflow:
                 result = subprocess.run(cmd, capture_output=True, text=True)
                 
                 if result.returncode != 0:
-                    self.log(f"Warning: Quantization {q_type} failed: {result.stderr}")
+                    self.log(f"      ⚠ {q_type} failed: {result.stderr[:100]}")
                     continue
                 
                 if hf_token:
                     if new_repo_id:
-                        self.log(f"Uploading {q_type} to {new_repo_id}...")
+                        self.log(f"      Uploading {q_type}...")
                         api.upload_file(
                             path_or_fileobj=q_path,
                             path_in_repo=f"{quant_base_name}.{q_type}.gguf",
@@ -316,15 +359,18 @@ class ModelWorkflow:
                             repo_type="model"
                         )
                         uploaded_files.append(q_type)
+                        self.log(f"      ✓ {q_type} uploaded")
                     else:
-                         self.log("Skipping upload: No valid repo ID created.")
+                         self.log(f"      ✓ {q_type} saved locally (no upload)")
                 
                 step_progress = 50 + int((idx + 1) / total_quants * 40)
                 self.progress(step_progress)
+            
+            self.log("")
 
             # 5. Readme
             if hf_token and uploaded_files and new_repo_id:
-                self.log("Generating README...")
+                self.log("▶ STEP 5: Generating README...")
                 readme_content = f"""
 ---
 tags:
@@ -350,20 +396,29 @@ The following quants are available:
                     repo_id=new_repo_id,
                     repo_type="model"
                 )
+                self.log(f"  ✓ README uploaded")
+                self.log("")
 
             self.status("complete")
             self.progress(100)
-            self.log("All tasks completed successfully.")
+            self.log("━━━ Pipeline Complete ━━━")
+            self.log(f"✓ Successfully converted {self.hf_repo_id}")
+            if new_repo_id:
+                self.log(f"✓ Uploaded to: https://huggingface.co/{new_repo_id}")
             self._update_db(completed_at=datetime.now().isoformat())
 
         except Exception as e:
             error_details = traceback.format_exc()
-            self.log(f"ERROR: {str(e)}")
+            self.log("")
+            self.log("━━━ Pipeline Failed ━━━")
+            self.log(f"✗ ERROR: {str(e)}")
             self._update_db(error_details=error_details, status="error")
             logger.exception("Pipeline failed")
         
         finally:
             # Always cleanup files
+            self.log("")
+            self.log("▶ Cleanup...")
             self.cleanup()
 
 # --- FastAPI App ---
