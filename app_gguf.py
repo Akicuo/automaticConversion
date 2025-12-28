@@ -307,20 +307,23 @@ class ModelWorkflow:
                     continue
                 
                 if hf_token:
-                    self.log(f"Uploading {q_type}...")
-                    api.upload_file(
-                        path_or_fileobj=q_path,
-                        path_in_repo=f"{quant_base_name}.{q_type}.gguf",
-                        repo_id=new_repo_id,
-                        repo_type="model"
-                    )
-                    uploaded_files.append(q_type)
+                    if new_repo_id:
+                        self.log(f"Uploading {q_type} to {new_repo_id}...")
+                        api.upload_file(
+                            path_or_fileobj=q_path,
+                            path_in_repo=f"{quant_base_name}.{q_type}.gguf",
+                            repo_id=new_repo_id,
+                            repo_type="model"
+                        )
+                        uploaded_files.append(q_type)
+                    else:
+                         self.log("Skipping upload: No valid repo ID created.")
                 
                 step_progress = 50 + int((idx + 1) / total_quants * 40)
                 self.progress(step_progress)
 
             # 5. Readme
-            if hf_token and uploaded_files:
+            if hf_token and uploaded_files and new_repo_id:
                 self.log("Generating README...")
                 readme_content = f"""
 ---
