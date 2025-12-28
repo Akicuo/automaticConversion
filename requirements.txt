@@ -16,3 +16,5 @@ huggingface_hub
 sentencepiece
 cmake 
 passlib
+torch
+torchvision
