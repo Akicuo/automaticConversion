@@ -34,6 +34,28 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("GGUF_Forge")
 
+# Custom filter to suppress frequent polling endpoints from access logs
+class EndpointFilter(logging.Filter):
+    """Filter out frequent polling endpoints from uvicorn access logs."""
+    def __init__(self, endpoints_to_skip: list):
+        super().__init__()
+        self.endpoints_to_skip = endpoints_to_skip
+    
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        for endpoint in self.endpoints_to_skip:
+            if endpoint in message:
+                return False
+        return True
+
+# Apply filter to uvicorn access logger
+uvicorn_access_logger = logging.getLogger("uvicorn.access")
+uvicorn_access_logger.addFilter(EndpointFilter([
+    "/api/status/all",
+    "/api/requests/all",
+    "/api/requests/my"
+]))
+
 # Handle paths for PyInstaller (Frozen) vs Dev
 if getattr(sys, 'frozen', False):
     BASE_DIR = Path(sys.executable).parent
