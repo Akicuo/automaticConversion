@@ -71,11 +71,15 @@
 </div>
 
 <template id="model-card-template">
-    <div class="model-card glass-panel" style="padding: 1.5rem; transition: border-color 0.2s;">
+    <div class="model-card glass-panel" data-model-id="" style="padding: 1.5rem; transition: border-color 0.2s;">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
             <h3 class="model-name" style="margin: 0; font-size: 1rem; font-weight: 500;">Model Name</h3>
-            <span class="status-badge"
-                style="font-family: monospace; letter-spacing: 0.05em; font-size: 0.75rem;">Status</span>
+            <div style="display: flex; align-items: center; gap: 0.75rem;">
+                <span class="status-badge"
+                    style="font-family: monospace; letter-spacing: 0.05em; font-size: 0.75rem;">Status</span>
+                <button class="delete-btn"
+                    style="display: none; background: transparent; color: var(--error); border: 1px solid var(--error); padding: 0.25rem 0.5rem; border-radius: 4px; cursor: pointer; font-size: 0.7rem;">Delete</button>
+            </div>
         </div>
         <div class="progress-bar-bg"
             style="background: rgba(255,255,255,0.05); height: 2px; width: 100%; margin-bottom: 1rem;">
@@ -225,9 +229,29 @@
         } catch (e) { console.error(e); }
     }
 
+    // Store scroll positions for each model's log panel
+    const logScrollPositions = {};
+
+    // Track if user is actively scrolling (to avoid auto-scroll to bottom)
+    const userScrolling = {};
+
     function renderModels(models) {
         const container = document.getElementById('models-list');
         const template = document.getElementById('model-card-template');
+
+        // Save current scroll positions before update
+        container.querySelectorAll('.model-card').forEach(card => {
+            const modelId = card.dataset.modelId;
+            const logs = card.querySelector('.logs');
+            if (modelId && logs) {
+                // Check if user has scrolled up (not at bottom)
+                const isAtBottom = logs.scrollHeight - logs.scrollTop <= logs.clientHeight + 50;
+                logScrollPositions[modelId] = {
+                    scrollTop: logs.scrollTop,
+                    wasAtBottom: isAtBottom
+                };
+            }
+        });
 
         container.innerHTML = '';
 
@@ -238,6 +262,10 @@
 
         models.forEach(model => {
             const clone = template.content.cloneNode(true);
+            const card = clone.querySelector('.model-card');
+
+            // Set model ID for tracking
+            card.dataset.modelId = model.id;
 
             clone.querySelector('.model-name').textContent = model.hf_repo_id;
 
@@ -254,7 +282,21 @@
 
             const logs = clone.querySelector('.logs');
             logs.textContent = model.log;
-            logs.scrollTop = logs.scrollHeight;
+
+            // Restore scroll position or scroll to bottom for new content
+            const savedPos = logScrollPositions[model.id];
+            if (savedPos) {
+                if (savedPos.wasAtBottom) {
+                    // User was at bottom, keep them there (auto-scroll)
+                    logs.scrollTop = logs.scrollHeight;
+                } else {
+                    // User had scrolled up, preserve their position
+                    logs.scrollTop = savedPos.scrollTop;
+                }
+            } else {
+                // New model, scroll to bottom
+                logs.scrollTop = logs.scrollHeight;
+            }
 
             // Show error details if present
             if (model.error_details) {
@@ -263,8 +305,31 @@
                 errorSection.textContent = model.error_details.slice(0, 500);
             }
 
+            // Show delete button for admin on error or complete status
+            if (isAdmin && (model.status === 'error' || model.status === 'complete')) {
+                const deleteBtn = clone.querySelector('.delete-btn');
+                deleteBtn.style.display = 'inline-block';
+                deleteBtn.onclick = () => deleteModel(model.id, model.hf_repo_id);
+            }
+
             container.appendChild(clone);
         });
+    }
+
+    async function deleteModel(modelId, modelName) {
+        if (!confirm(`Delete job for "${modelName}"?`)) return;
+
+        try {
+            const res = await fetch(`/api/models/${modelId}`, { method: 'DELETE' });
+            if (res.ok) {
+                fetchStatus();
+            } else {
+                const err = await res.json();
+                alert('Failed to delete: ' + err.detail);
+            }
+        } catch (e) {
+            alert('Failed to delete model');
+        }
     }
 
     // Requests (Admin only)
