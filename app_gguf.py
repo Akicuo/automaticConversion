@@ -354,6 +354,15 @@ class LlamaCppManager:
         logger.info("Building llama.cpp...")
         system = platform.system()
         
+        # Check if already built - skip if llama-quantize exists
+        try:
+            existing = LlamaCppManager.get_quantize_path()
+            if existing.exists():
+                logger.info(f"llama.cpp already built, skipping. Found: {existing}")
+                return
+        except FileNotFoundError:
+            pass  # Not built yet, continue with build
+        
         # Check if cmake is available
         if not LlamaCppManager.check_tool("cmake"):
             raise Exception("CMake is not installed or not in PATH. Please install CMake.")
