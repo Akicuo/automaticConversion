@@ -14,3 +14,5 @@ hf_xet
 hf_transfer
 huggingface_hub
 sentencepiece
+cmake 
+passlib
