@@ -75,6 +75,9 @@ CACHE_DIR.mkdir(exist_ok=True)
 # Llama.cpp Constants
 QUANTS = ["Q2_K", "Q3_K_S", "Q3_K_M", "Q3_K_L", "Q4_0", "Q4_K_S", "Q4_K_M", "Q5_0", "Q5_K_S", "Q5_K_M", "Q6_K", "Q8_0"]
 
+# Quantization Performance Settings
+PARALLEL_QUANT_JOBS = int(os.getenv("PARALLEL_QUANT_JOBS", "2"))  # How many quantizations to run simultaneously (1=sequential, 2=default, 4=aggressive)
+
 # Security
 pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
 cookie_sec = APIKeyCookie(name="session_token", auto_error=False)
@@ -773,34 +776,62 @@ class ModelWorkflow:
             successful_quants = []  # List of (q_type, q_path) tuples
             
             total_quants = len(QUANTS)
-            for idx, q_type in enumerate(QUANTS):
-                self.log(f"  [{idx+1}/{total_quants}] Quantizing {q_type}...")
-                q_path = CACHE_DIR / f"{quant_base_name}.{q_type}.gguf"
-                self.quant_paths.append(q_path)
-                
-                # Track time for this quant
-                quant_start = time.time()
-                
-                # Run quantization asynchronously
-                process = await asyncio.create_subprocess_exec(
-                    str(quantize_bin), str(self.fp16_path), str(q_path), q_type,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                stdout, stderr = await process.communicate()
-                
-                quant_duration = time.time() - quant_start
-                
-                if process.returncode != 0:
-                    self.log(f"      ⚠ {q_type} failed: {stderr.decode()[:100]}")
-                    continue
-                
-                self.quant_times.append((q_type, quant_duration))
-                self.log(f"      ✓ {q_type} quantized successfully ({self.format_duration(quant_duration)})")
-                successful_quants.append((q_type, q_path))
-                
-                step_progress = 50 + int((idx + 1) / total_quants * 30)
-                self.progress(step_progress)
+            
+            # Detect CPU cores and split for parallel jobs
+            import multiprocessing
+            total_cores = multiprocessing.cpu_count()
+            parallel_jobs = max(1, min(PARALLEL_QUANT_JOBS, total_quants))  # Clamp between 1 and total quants
+            cores_per_job = max(1, total_cores // parallel_jobs)  # Each job gets equal share of cores
+            
+            if parallel_jobs == 1:
+                self.log(f"  CPU cores: {total_cores} total (sequential mode)")
+            else:
+                self.log(f"  CPU cores: {total_cores} total, {cores_per_job} per quantization job")
+                self.log(f"  Running {parallel_jobs} quantizations in parallel")
+            self.log("")
+            
+            # Run quantizations with configured parallelism
+            sem = asyncio.Semaphore(parallel_jobs)
+            
+            async def quantize_single(idx, q_type):
+                async with sem:
+                    self.log(f"  [{idx+1}/{total_quants}] Starting {q_type}...")
+                    q_path = CACHE_DIR / f"{quant_base_name}.{q_type}.gguf"
+                    self.quant_paths.append(q_path)
+                    
+                    quant_start = time.time()
+                    
+                    try:
+                        # Set environment to limit thread usage
+                        env = os.environ.copy()
+                        env['OMP_NUM_THREADS'] = str(cores_per_job)
+                        env['MKL_NUM_THREADS'] = str(cores_per_job)
+                        env['OPENBLAS_NUM_THREADS'] = str(cores_per_job)
+                        
+                        process = await asyncio.create_subprocess_exec(
+                            str(quantize_bin), str(self.fp16_path), str(q_path), q_type,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE,
+                            env=env
+                        )
+                        stdout, stderr = await process.communicate()
+                        
+                        quant_duration = time.time() - quant_start
+                        
+                        if process.returncode != 0:
+                            self.log(f"      ⚠ {q_type} failed: {stderr.decode()[:100]}")
+                        else:
+                            self.quant_times.append((q_type, quant_duration))
+                            self.log(f"      ✓ {q_type} ready ({self.format_duration(quant_duration)})")
+                            successful_quants.append((q_type, q_path))
+                            # Update progress
+                            step_progress = 50 + int(len(successful_quants) / total_quants * 30)
+                            self.progress(step_progress)
+                    except Exception as e:
+                        self.log(f"      ⚠ {q_type} error: {e}")
+
+            # Launch all quantization jobs (controlled by PARALLEL_QUANT_JOBS semaphore)
+            await asyncio.gather(*(quantize_single(i, q) for i, q in enumerate(QUANTS)))
             
             self.end_step("quantize")
             self.log("")

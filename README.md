@@ -101,6 +101,14 @@ OAUTH_REDIRECT_URI=http://localhost:8000/auth/callback
 You can also set these environment variables (they have defaults):
 - `PORT`: Server port (default: 8000)
 - `HOST`: Server host (default: 0.0.0.0)
+- `PARALLEL_QUANT_JOBS`: Number of simultaneous quantization jobs (default: 2)
+  - `1` = Sequential (original behavior, slowest but safest)
+  - `2` = Default (balanced, recommended for most systems)
+  - `4` = Aggressive (fastest on high-end systems with 16+ cores and fast NVMe)
+  - **Performance Notes**:
+    - Each job gets an equal share of CPU cores (e.g., 16 cores ÷ 2 jobs = 8 cores each)
+    - Higher values speed up conversion but require more RAM and may cause CPU/IO contention
+    - Recommended: `2` for 8-16 cores, `4` for 24+ cores with 64GB+ RAM
 
 ## Usage
 
@@ -156,7 +164,7 @@ Each conversion goes through these steps:
 1. **Setup** (10%): Clone and build llama.cpp
 2. **Download** (30%): Download model from HuggingFace
 3. **Convert** (50%): Convert to FP16 GGUF format
-4. **Quantize** (80%): Create all quantization levels (Q2_K, Q3_K_S, Q3_K_M, Q3_K_L, Q4_0, Q4_K_S, Q4_K_M, Q5_0, Q5_K_S, Q5_K_M, Q6_K, Q8_0)
+4. **Quantize** (80%): Create all quantization levels in parallel (Q2_K, Q3_K_S, Q3_K_M, Q3_K_L, Q4_0, Q4_K_S, Q4_K_M, Q5_0, Q5_K_S, Q5_K_M, Q6_K, Q8_0)
 5. **Upload** (90%): Concurrent upload of all quants to HuggingFace
 6. **README** (100%): Generate and upload README with stats
 
@@ -172,7 +180,8 @@ Each conversion tracks:
 - The first conversion will take longer as it clones and builds `llama.cpp`
 - Ensure you have enough disk space. A 7B model requires ~15GB for download + ~15GB for FP16 + ~5-10GB per quant
 - All conversions run asynchronously and won't block the server
-- Quantizations are uploaded concurrently (4 at a time) for faster completion
+- Quantizations run in parallel (configurable via `PARALLEL_QUANT_JOBS`, default: 2 simultaneous jobs)
+- Uploads are concurrent (4 at a time) for faster completion
 - Files are automatically cleaned up after upload
 
 ## Troubleshooting
