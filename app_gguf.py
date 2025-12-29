@@ -99,13 +99,13 @@ def get_current_user(request: Request):
     if not token: 
         return None
     conn = get_db_connection()
-    # Check admin users first
+    # Check admin users first (legacy password-based admins)
     user = conn.execute("SELECT *, 'admin' as user_type FROM users WHERE api_key = ?", (token,)).fetchone()
     if user:
         conn.close()
         return user
-    # Check OAuth users
-    oauth_user = conn.execute("SELECT *, 'oauth' as user_type, 'user' as role FROM oauth_users WHERE session_token = ?", (token,)).fetchone()
+    # Check OAuth users - role is now stored in database
+    oauth_user = conn.execute("SELECT *, 'oauth' as user_type FROM oauth_users WHERE session_token = ?", (token,)).fetchone()
     conn.close()
     return oauth_user
 

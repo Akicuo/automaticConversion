@@ -130,20 +130,29 @@ async def oauth_callback(code: str, state: str = None):
     # Create session token
     session_token = secrets.token_urlsafe(32)
     
+    # Check if user should be admin (from ADMIN_USERS env variable)
+    from database import is_admin_user
+    role = "admin" if is_admin_user(username) else "user"
+    
     # Save or update user in database
     conn = get_db_connection()
     existing = conn.execute("SELECT * FROM oauth_users WHERE id = ?", (hf_user_id,)).fetchone()
     
     if existing:
+        # Update existing user - also update role in case admin list changed
         conn.execute(
-            "UPDATE oauth_users SET username = ?, email = ?, avatar_url = ?, session_token = ? WHERE id = ?",
-            (username, email, avatar_url, session_token, hf_user_id)
+            "UPDATE oauth_users SET username = ?, email = ?, avatar_url = ?, session_token = ?, role = ? WHERE id = ?",
+            (username, email, avatar_url, session_token, role, hf_user_id)
         )
+        if role == "admin":
+            logger.info(f"Admin user logged in: {username}")
     else:
         conn.execute(
-            "INSERT INTO oauth_users (id, username, email, avatar_url, session_token) VALUES (?, ?, ?, ?, ?)",
-            (hf_user_id, username, email, avatar_url, session_token)
+            "INSERT INTO oauth_users (id, username, email, avatar_url, session_token, role) VALUES (?, ?, ?, ?, ?, ?)",
+            (hf_user_id, username, email, avatar_url, session_token, role)
         )
+        if role == "admin":
+            logger.info(f"New admin user created: {username}")
     
     conn.commit()
     conn.close()

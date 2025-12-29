@@ -24,6 +24,14 @@ MSSQL_PASSWORD = os.getenv("MSSQL_PASSWORD", "")
 MSSQL_ENCRYPT = os.getenv("MSSQL_ENCRYPT", "yes")
 MSSQL_TRUST_CERT = os.getenv("MSSQL_TRUST_CERT", "yes")
 
+# Admin Users - comma-separated list of HuggingFace usernames who should be admins
+ADMIN_USERS = [u.strip().lower() for u in os.getenv("ADMIN_USERS", "").split(",") if u.strip()]
+
+
+def is_admin_user(username: str) -> bool:
+    """Check if a username is in the admin list."""
+    return username.lower() in ADMIN_USERS
+
 
 def set_db_path(path: Path):
     """Set the SQLite database path."""
@@ -363,6 +371,7 @@ def _init_sqlite_tables(conn: DatabaseConnection):
             email TEXT,
             avatar_url TEXT,
             session_token TEXT,
+            role TEXT DEFAULT 'user',
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -395,6 +404,12 @@ def _init_sqlite_tables(conn: DatabaseConnection):
     # Migration: Add decline_reason column if it doesn't exist
     try:
         c.execute("ALTER TABLE requests ADD COLUMN decline_reason TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass
+    
+    # Migration: Add role column to oauth_users if it doesn't exist
+    try:
+        c.execute("ALTER TABLE oauth_users ADD COLUMN role TEXT DEFAULT 'user'")
     except sqlite3.OperationalError:
         pass
     
@@ -457,10 +472,21 @@ def _init_mssql_tables(conn: DatabaseConnection):
             email NVARCHAR(255),
             avatar_url NVARCHAR(500),
             session_token NVARCHAR(255),
+            role NVARCHAR(50) DEFAULT 'user',
             created_at DATETIME DEFAULT GETDATE()
         )
     ''')
     conn.commit()
+    
+    # Migration: Add role column to oauth_users if it doesn't exist
+    try:
+        conn.execute('''
+            IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'oauth_users' AND COLUMN_NAME = 'role')
+            ALTER TABLE oauth_users ADD role NVARCHAR(50) DEFAULT 'user'
+        ''')
+        conn.commit()
+    except:
+        pass
     
     # Tickets table
     conn.execute('''

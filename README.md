@@ -107,7 +107,23 @@ HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 OAUTH_CLIENT_ID=your_oauth_client_id_here
 OAUTH_CLIENT_SECRET=your_oauth_client_secret_here
 OAUTH_REDIRECT_URI=http://localhost:8000/auth/callback
+
+# Admin Users (HuggingFace usernames, comma-separated)
+ADMIN_USERS=Akicuo,ungsung
 ```
+
+### Admin Configuration
+Instead of using a password-based admin account, admins are configured via the `ADMIN_USERS` environment variable:
+
+```env
+# Comma-separated list of HuggingFace usernames
+ADMIN_USERS=Akicuo,ungsung,anotheruser
+```
+
+When these users login via HuggingFace OAuth, they automatically get admin privileges. This means:
+- No need to remember separate admin credentials
+- Easy to add/remove admins by updating `.env` and restarting
+- Role is updated on each login (so changes take effect immediately)
 
 ### Optional Configuration
 You can also set these environment variables (they have defaults):
