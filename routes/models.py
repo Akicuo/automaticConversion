@@ -49,8 +49,14 @@ async def process_model(req: ProcessRequest, background_tasks: BackgroundTasks, 
          raise HTTPException(status_code=400, detail="Model already processing")
     
     new_id = str(uuid.uuid4())
+    
+    # Delete existing record first (if any) for MSSQL compatibility
+    # This replaces "INSERT OR REPLACE" which is SQLite-specific
+    if existing:
+        conn.execute("DELETE FROM models WHERE hf_repo_id = ?", (req.model_id,))
+    
     conn.execute(
-        "INSERT OR REPLACE INTO models (id, hf_repo_id, status, progress, log, error_details) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO models (id, hf_repo_id, status, progress, log, error_details) VALUES (?, ?, ?, ?, ?, ?)",
         (new_id, req.model_id, "pending", 0, "Queued...", "")
     )
     conn.commit()

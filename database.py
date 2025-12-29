@@ -193,12 +193,30 @@ class MSSQLConnection(DatabaseConnection):
         self._columns = []
         self._last_id = 0
     
+    def _adapt_params(self, params: tuple) -> tuple:
+        """Adapt parameter values for MSSQL compatibility."""
+        if not params:
+            return params
+        
+        adapted = []
+        for p in params:
+            if isinstance(p, str):
+                # Convert ISO datetime format (2025-12-29T07:02:59) to MSSQL format (2025-12-29 07:02:59)
+                # Check if it looks like an ISO datetime
+                if len(p) >= 19 and p[4] == '-' and p[7] == '-' and p[10] == 'T':
+                    p = p.replace('T', ' ')
+            adapted.append(p)
+        return tuple(adapted)
+    
     def execute(self, query: str, params: tuple = ()) -> 'MSSQLConnection':
         # Convert SQLite-style placeholders (?) to MSSQL-style (?)
         # pyodbc also uses ? so this should work, but we need to handle some differences
         
         # Handle SQLite-specific syntax
         query = self._adapt_query(query)
+        
+        # Adapt parameters for MSSQL compatibility
+        params = self._adapt_params(params)
         
         self.cursor = self.conn.cursor()
         
