@@ -5,6 +5,8 @@ A modern, glassmorphic FastAPI application to automate the conversion of Hugging
 > 🚀 **Don't want to self-host?** Use our free hosted service at **[gguforge.com](https://gguforge.com)** — no setup required! Just login with HuggingFace and request your conversions.
 
 ## Features
+
+### Core Features
 - **HuggingFace OAuth**: Guest login with HuggingFace for requesting conversions
 - **Request System**: Users can request model conversions, admins approve/decline with reasons
 - **Dashboard**: Real-time status of model conversions with detailed logs
@@ -16,6 +18,16 @@ A modern, glassmorphic FastAPI application to automate the conversion of Hugging
 - **Llama.cpp Management**: Automatically clones and builds `llama.cpp`
 - **Validation**: Checks disk space before processing
 - **Responsive UI**: Glassmorphism design with real-time updates
+
+### Task Management
+- **Job Termination**: Admins can terminate any running conversion job mid-process
+- **Startup Recovery**: Automatically detects and recovers stuck jobs after server crashes
+- **Ticket System**: Conversational threads between users and admins for discussing requests
+- **Discussion Workflow**: Instead of instant rejection, admins can start discussions with users
+
+### Database Support
+- **SQLite**: Default, zero-config local database
+- **MSSQL**: Enterprise-grade Microsoft SQL Server support for production deployments
 
 ## Prerequisites
 1.  **Python 3.10+**
@@ -110,6 +122,68 @@ You can also set these environment variables (they have defaults):
     - Higher values speed up conversion but require more RAM and may cause CPU/IO contention
     - Recommended: `2` for 8-16 cores, `4` for 24+ cores with 64GB+ RAM
 
+### Database Configuration
+
+GGUF Forge supports two database backends: **SQLite** (default) and **MSSQL**.
+
+#### SQLite (Default)
+No configuration needed. A local `gguf_app.db` file is created automatically.
+
+#### MSSQL Server
+To use MSSQL instead of SQLite, add these variables to your `.env`:
+
+```env
+# Database type: "sqlite" (default) or "mssql"
+DB_TYPE=mssql
+
+# MSSQL Configuration
+MSSQL_HOST=your-server.database.net
+MSSQL_PORT=1433
+MSSQL_DATABASE=gguforge
+MSSQL_USER=your_username
+MSSQL_PASSWORD=your_password
+MSSQL_ENCRYPT=yes
+MSSQL_TRUST_CERT=yes
+```
+
+**Prerequisites for MSSQL:**
+1. Install the ODBC Driver for SQL Server:
+   - **Windows**: Download from [Microsoft](https://docs.microsoft.com/en-us/sql/connect/odbc/download-odbc-driver-for-sql-server)
+   - **Linux (Ubuntu/Debian)**:
+     ```bash
+     curl https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
+     curl https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
+     sudo apt-get update
+     sudo ACCEPT_EULA=Y apt-get install -y msodbcsql17
+     ```
+   - **macOS**:
+     ```bash
+     brew install microsoft/mssql-release/msodbcsql17
+     ```
+
+2. Install pyodbc (already in requirements.txt):
+   ```bash
+   pip install pyodbc
+   ```
+
+**Testing Connection:**
+After configuration, verify with:
+```bash
+curl http://localhost:8000/api/health
+```
+
+Response shows database status:
+```json
+{
+  "status": "healthy",
+  "database": {
+    "type": "mssql",
+    "connected": true,
+    "message": "Successfully connected to mssql database"
+  }
+}
+```
+
 ## Usage
 
 ### Starting the Application
@@ -201,9 +275,105 @@ Each conversion tracks:
 - **Linux**: Install `build-essential` and `cmake`
 - Check that `git` is installed and in PATH
 
+### MSSQL Connection Issues
+- Ensure ODBC Driver 17 for SQL Server is installed
+- Verify server allows remote connections
+- Check firewall rules for the MSSQL port
+- Test connection with: `curl http://localhost:8000/api/health`
+
+## Admin Features
+
+### Job Termination
+Admins can terminate any running conversion job:
+1. Find the job in the "Conversion Queue" section
+2. Click the orange **Terminate** button
+3. The job will stop and be marked as "TERMINATED"
+
+Jobs terminated mid-process can be restarted by re-approving the original request.
+
+### Ticket/Discussion System
+Instead of instantly rejecting requests, admins can start discussions:
+
+1. **Starting a Discussion**: Click "Discuss" on a pending request
+2. **Admin Dashboard**: View all active discussions in the "Active Discussions" section
+3. **Conversation**: Both admin and user can exchange messages
+4. **Resolution**: Admin can either:
+   - **Approve**: Start the conversion
+   - **Close**: Reject the request
+
+Users see their discussions in "My Requests" with a "View Thread" button.
+
+### Startup Recovery
+If the server crashes during a conversion:
+- On restart, stuck jobs are automatically marked as "INTERRUPTED"
+- Associated requests are reset to "PENDING" for re-approval
+- No manual intervention required
+
+## API Reference
+
+### Public Endpoints
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/health` | GET | Health check with database status |
+| `/api/hf/search?q=query` | GET | Search HuggingFace models |
+| `/api/status/all` | GET | Get all conversion jobs |
+
+### Authenticated Endpoints
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/requests/submit` | POST | Submit a conversion request |
+| `/api/requests/my` | GET | Get user's requests |
+| `/api/tickets/my` | GET | Get user's tickets |
+| `/api/tickets/{id}/messages` | GET | Get ticket messages |
+| `/api/tickets/{id}/reply` | POST | Reply to a ticket |
+| `/api/tickets/{id}/reopen` | POST | Reopen a closed ticket |
+
+### Admin Endpoints
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/models/process` | POST | Start a conversion directly |
+| `/api/models/{id}/terminate` | POST | Terminate a running job |
+| `/api/requests/all` | GET | View all requests |
+| `/api/requests/{id}/approve` | POST | Approve a request |
+| `/api/requests/{id}/reject` | POST | Reject a request |
+| `/api/tickets/create` | POST | Create a discussion ticket |
+| `/api/tickets/all` | GET | View all tickets |
+| `/api/tickets/{id}/approve` | POST | Approve from ticket |
+| `/api/tickets/{id}/close` | POST | Close/reject a ticket |
+| `/api/admin/db-info` | GET | Database information |
+
+## Project Structure
+
+```
+automaticConversion/
+├── app_gguf.py          # Main FastAPI application
+├── database.py          # Database abstraction (SQLite + MSSQL)
+├── security.py          # Rate limiting, bot detection, spam protection
+├── models.py            # Pydantic request/response models
+├── managers.py          # LlamaCpp and HuggingFace managers
+├── workflow.py          # Model conversion pipeline
+├── routes/
+│   ├── auth.py          # Authentication (admin login + OAuth)
+│   ├── models.py        # Model processing endpoints
+│   ├── requests.py      # Request system endpoints
+│   └── tickets.py       # Ticket/discussion endpoints
+├── static/
+│   ├── js/
+│   │   └── tickets.js   # Ticket modal JavaScript
+│   └── favicon.png
+├── templates/
+│   ├── base.html        # Base template
+│   ├── index.html       # Main dashboard
+│   └── login.html       # Admin login page
+├── .env.example         # Environment template
+└── requirements.txt     # Python dependencies
+```
+
 ## License
 MIT
 
 ## Credits
 - [llama.cpp](https://github.com/ggerganov/llama.cpp) - GGUF quantization
 - [HuggingFace](https://huggingface.co) - Model hosting and OAuth
+- [FastAPI](https://fastapi.tiangolo.com/) - Web framework
+- [pyodbc](https://github.com/mkleehammer/pyodbc) - MSSQL connectivity
