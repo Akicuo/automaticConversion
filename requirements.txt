@@ -17,3 +17,5 @@ passlib
 torch
 torchvision
 pyodbc
+aiosqlite
+aioodbc

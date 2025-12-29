@@ -93,36 +93,39 @@ spam_protection = SpamProtection(max_requests_per_hour=10, max_pending_per_user=
 
 
 # --- User Authentication Helpers ---
-def get_current_user(request: Request):
+async def get_current_user(request: Request):
     """Get current user - checks both admin users and OAuth users."""
     token = request.cookies.get("session_token")
     if not token: 
         return None
-    conn = get_db_connection()
+    conn = await get_db_connection()
     # Check admin users first (legacy password-based admins)
-    user = conn.execute("SELECT *, 'admin' as user_type FROM users WHERE api_key = ?", (token,)).fetchone()
-    if user:
-        conn.close()
-        return user
+    user = (await conn.execute("SELECT *, 'admin' as user_type FROM users WHERE api_key = ?", (token,))).cursor
+    row = await conn.fetchone()
+    if row:
+        await conn.close()
+        return row
     # Check OAuth users - role is now stored in database
-    oauth_user = conn.execute("SELECT *, 'oauth' as user_type FROM oauth_users WHERE session_token = ?", (token,)).fetchone()
-    conn.close()
+    await conn.execute("SELECT *, 'oauth' as user_type FROM oauth_users WHERE session_token = ?", (token,))
+    oauth_user = await conn.fetchone()
+    await conn.close()
     return oauth_user
 
 
-def get_oauth_user(request: Request):
+async def get_oauth_user(request: Request):
     """Get OAuth user only (not admin)."""
     token = request.cookies.get("session_token")
     if not token: 
         return None
-    conn = get_db_connection()
-    oauth_user = conn.execute("SELECT * FROM oauth_users WHERE session_token = ?", (token,)).fetchone()
-    conn.close()
+    conn = await get_db_connection()
+    await conn.execute("SELECT * FROM oauth_users WHERE session_token = ?", (token,))
+    oauth_user = await conn.fetchone()
+    await conn.close()
     return oauth_user
 
 
-def require_admin(request: Request):
-    user = get_current_user(request)
+async def require_admin(request: Request):
+    user = await get_current_user(request)
     if not user or user['role'] != 'admin':
         from fastapi import HTTPException
         raise HTTPException(status_code=403, detail="Admin access required")
@@ -132,15 +135,16 @@ def require_admin(request: Request):
 # --- App Lifespan ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_db()
-    conn = get_db_connection()
+    await init_db()
+    conn = await get_db_connection()
     
     # Startup cleanup: Check for stuck 'processing' jobs from crashed server
     processing_statuses = ['pending', 'initializing', 'downloading', 'converting', 'quantizing', 'uploading']
-    stuck_jobs = conn.execute(
+    await conn.execute(
         f"SELECT * FROM models WHERE status IN ({','.join(['?']*len(processing_statuses))})",
-        processing_statuses
-    ).fetchall()
+        tuple(processing_statuses)
+    )
+    stuck_jobs = await conn.fetchall()
     
     if stuck_jobs:
         logger.warning(f"Found {len(stuck_jobs)} stuck processing jobs from previous session")
@@ -150,19 +154,20 @@ async def lifespan(app: FastAPI):
             old_status = job['status']
             
             # Update the model status to indicate it was interrupted
-            conn.execute(
+            await conn.execute(
                 "UPDATE models SET status = ?, error_details = ? WHERE id = ?",
                 ("interrupted", f"Server shutdown while status was '{old_status}'. Job can be restarted.", model_id)
             )
             
             # Check if there was an associated request that needs to be reset
-            existing_request = conn.execute(
+            await conn.execute(
                 "SELECT * FROM requests WHERE hf_repo_id = ? AND status = 'approved'",
                 (hf_repo_id,)
-            ).fetchone()
+            )
+            existing_request = await conn.fetchone()
             
             if existing_request:
-                conn.execute(
+                await conn.execute(
                     "UPDATE requests SET status = 'pending' WHERE id = ?",
                     (existing_request['id'],)
                 )
@@ -170,18 +175,19 @@ async def lifespan(app: FastAPI):
             
             logger.info(f"Marked stuck job {model_id} ({hf_repo_id}) as interrupted")
         
-        conn.commit()
+        await conn.commit()
         logger.info("Startup cleanup complete")
     
     # Create admin user if not exists
-    admin = conn.execute("SELECT * FROM users WHERE role = 'admin'").fetchone()
+    await conn.execute("SELECT * FROM users WHERE role = 'admin'")
+    admin = await conn.fetchone()
     if not admin:
         key = secrets.token_urlsafe(16)
         pwd = secrets.token_urlsafe(8)
         hashed = pwd_context.hash(pwd)
-        conn.execute("INSERT INTO users (username, hashed_password, role, api_key) VALUES (?, ?, ?, ?)",
+        await conn.execute("INSERT INTO users (username, hashed_password, role, api_key) VALUES (?, ?, ?, ?)",
                      ("admin", hashed, "admin", key))
-        conn.commit()
+        await conn.commit()
         
         creds_text = f"""
 ==================================================
@@ -199,7 +205,7 @@ API Key: {key}
         except Exception as e:
             print(f"Failed to write creds.txt: {e}")
             
-    conn.close()
+    await conn.close()
     yield
 
 
@@ -270,8 +276,8 @@ app.include_router(tickets.router)
 # --- Main Routes ---
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
-    user = get_current_user(request)
-    oauth_user = get_oauth_user(request)
+    user = await get_current_user(request)
+    oauth_user = await get_oauth_user(request)
     return templates.TemplateResponse("index.html", {
         "request": request, 
         "user": user['username'] if user else None,
@@ -286,7 +292,7 @@ async def health_check():
     """Health check endpoint with database status."""
     from database import test_connection, DB_TYPE
     
-    db_ok, db_msg = test_connection()
+    db_ok, db_msg = await test_connection()
     
     return {
         "status": "healthy" if db_ok else "degraded",
@@ -300,11 +306,12 @@ async def health_check():
 
 
 @app.get("/api/admin/db-info")
-async def get_db_info(user = Depends(require_admin)):
+async def get_db_info(request: Request):
     """Admin only: Get database information."""
+    user = await require_admin(request)
     from database import DB_TYPE, test_connection
     
-    db_ok, db_msg = test_connection()
+    db_ok, db_msg = await test_connection()
     
     info = {
         "type": DB_TYPE,

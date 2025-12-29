@@ -23,10 +23,10 @@ def configure(admin_dependency):
     _require_admin_func = admin_dependency
 
 
-def get_admin(request: Request):
+async def get_admin(request: Request):
     """Dependency that uses the configured admin check."""
     if _require_admin_func:
-        return _require_admin_func(request)
+        return await _require_admin_func(request)
     raise HTTPException(status_code=500, detail="Admin dependency not configured")
 
 
@@ -41,11 +41,12 @@ async def search_hf(q: str):
 
 @router.post("/models/process")
 async def process_model(req: ProcessRequest, background_tasks: BackgroundTasks, user = Depends(get_admin)):
-    conn = get_db_connection()
-    existing = conn.execute("SELECT * FROM models WHERE hf_repo_id = ?", (req.model_id,)).fetchone()
+    conn = await get_db_connection()
+    await conn.execute("SELECT * FROM models WHERE hf_repo_id = ?", (req.model_id,))
+    existing = await conn.fetchone()
     
     if existing and existing['status'] in ['pending', 'downloading', 'converting', 'quantizing', 'initializing']:
-         conn.close()
+         await conn.close()
          raise HTTPException(status_code=400, detail="Model already processing")
     
     new_id = str(uuid.uuid4())
@@ -53,14 +54,14 @@ async def process_model(req: ProcessRequest, background_tasks: BackgroundTasks, 
     # Delete existing record first (if any) for MSSQL compatibility
     # This replaces "INSERT OR REPLACE" which is SQLite-specific
     if existing:
-        conn.execute("DELETE FROM models WHERE hf_repo_id = ?", (req.model_id,))
+        await conn.execute("DELETE FROM models WHERE hf_repo_id = ?", (req.model_id,))
     
-    conn.execute(
+    await conn.execute(
         "INSERT INTO models (id, hf_repo_id, status, progress, log, error_details) VALUES (?, ?, ?, ?, ?, ?)",
         (new_id, req.model_id, "pending", 0, "Queued...", "")
     )
-    conn.commit()
-    conn.close()
+    await conn.commit()
+    await conn.close()
     
     workflow = ModelWorkflow(new_id, req.model_id)
     background_tasks.add_task(workflow.run_pipeline)
@@ -70,17 +71,19 @@ async def process_model(req: ProcessRequest, background_tasks: BackgroundTasks, 
 
 @router.get("/status/all")
 async def get_all_status():
-    conn = get_db_connection()
-    models = conn.execute("SELECT * FROM models ORDER BY created_at DESC LIMIT 50").fetchall()
-    conn.close()
+    conn = await get_db_connection()
+    await conn.execute("SELECT * FROM models ORDER BY created_at DESC LIMIT 50")
+    models = await conn.fetchall()
+    await conn.close()
     return [dict(m) for m in models]
 
 
 @router.get("/status/model/{model_id}")
 async def get_model_status(model_id: str):
-    conn = get_db_connection()
-    model = conn.execute("SELECT * FROM models WHERE hf_repo_id = ?", (model_id,)).fetchone()
-    conn.close()
+    conn = await get_db_connection()
+    await conn.execute("SELECT * FROM models WHERE hf_repo_id = ?", (model_id,))
+    model = await conn.fetchone()
+    await conn.close()
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
     return dict(model)
@@ -89,10 +92,10 @@ async def get_model_status(model_id: str):
 @router.delete("/models/{model_id}")
 async def delete_model_record(model_id: str, user = Depends(get_admin)):
     """Admin only: Delete a model record from the database."""
-    conn = get_db_connection()
-    conn.execute("DELETE FROM models WHERE id = ?", (model_id,))
-    conn.commit()
-    conn.close()
+    conn = await get_db_connection()
+    await conn.execute("DELETE FROM models WHERE id = ?", (model_id,))
+    await conn.commit()
+    await conn.close()
     return {"status": "deleted"}
 
 
@@ -102,9 +105,10 @@ async def terminate_model(model_id: str, user = Depends(get_admin)):
     # Check if this workflow is currently running
     if model_id not in running_workflows:
         # Check if the job exists in DB
-        conn = get_db_connection()
-        model = conn.execute("SELECT * FROM models WHERE id = ?", (model_id,)).fetchone()
-        conn.close()
+        conn = await get_db_connection()
+        await conn.execute("SELECT * FROM models WHERE id = ?", (model_id,))
+        model = await conn.fetchone()
+        await conn.close()
         
         if not model:
             raise HTTPException(status_code=404, detail="Job not found")
@@ -112,13 +116,13 @@ async def terminate_model(model_id: str, user = Depends(get_admin)):
             raise HTTPException(status_code=400, detail=f"Job already finished with status: {model['status']}")
         
         # Job exists but not in running_workflows - mark as terminated directly
-        conn = get_db_connection()
-        conn.execute(
+        conn = await get_db_connection()
+        await conn.execute(
             "UPDATE models SET status = ?, error_details = ? WHERE id = ?",
             ("terminated", "Terminated by administrator (job was not actively running)", model_id)
         )
-        conn.commit()
-        conn.close()
+        await conn.commit()
+        await conn.close()
         return {"status": "terminated", "message": "Job marked as terminated"}
     
     # Terminate the running workflow

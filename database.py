@@ -1,12 +1,14 @@
 """
 Database abstraction layer for GGUF Forge.
-Supports both SQLite and MSSQL backends.
+Supports both SQLite and MSSQL backends with async operations.
+Uses aioodbc for async ODBC connections.
 """
 import os
 import logging
+import asyncio
 from pathlib import Path
 from typing import Optional, Any, List, Dict
-from contextlib import contextmanager
+from contextlib import asynccontextmanager
 from abc import ABC, abstractmethod
 
 logger = logging.getLogger("GGUF_Forge")
@@ -23,6 +25,10 @@ MSSQL_USER = os.getenv("MSSQL_USER", "")
 MSSQL_PASSWORD = os.getenv("MSSQL_PASSWORD", "")
 MSSQL_ENCRYPT = os.getenv("MSSQL_ENCRYPT", "yes")
 MSSQL_TRUST_CERT = os.getenv("MSSQL_TRUST_CERT", "yes")
+
+# Connection retry settings
+MAX_RETRIES = 3
+RETRY_DELAY = 1.0  # seconds
 
 # Admin Users - comma-separated list of HuggingFace usernames who should be admins
 ADMIN_USERS = [u.strip().lower() for u in os.getenv("ADMIN_USERS", "").split(",") if u.strip()]
@@ -63,78 +69,94 @@ class DatabaseRow:
         return self._data.items()
 
 
-class DatabaseConnection(ABC):
-    """Abstract base class for database connections."""
+class AsyncDatabaseConnection(ABC):
+    """Abstract base class for async database connections."""
     
     @abstractmethod
-    def execute(self, query: str, params: tuple = ()) -> Any:
+    async def execute(self, query: str, params: tuple = ()) -> Any:
         """Execute a query and return cursor/result."""
         pass
     
     @abstractmethod
-    def commit(self):
+    async def commit(self):
         """Commit the transaction."""
         pass
     
     @abstractmethod
-    def close(self):
+    async def close(self):
         """Close the connection."""
         pass
     
     @abstractmethod
-    def fetchone(self) -> Optional[DatabaseRow]:
+    async def fetchone(self) -> Optional[DatabaseRow]:
         """Fetch one row from last query."""
         pass
     
     @abstractmethod
-    def fetchall(self) -> List[DatabaseRow]:
+    async def fetchall(self) -> List[DatabaseRow]:
         """Fetch all rows from last query."""
+        pass
+    
+    @property
+    @abstractmethod
+    def lastrowid(self) -> int:
+        """Get the last inserted row ID."""
         pass
 
 
-class SQLiteConnection(DatabaseConnection):
-    """SQLite database connection wrapper."""
+class AsyncSQLiteConnection(AsyncDatabaseConnection):
+    """Async SQLite database connection wrapper using aiosqlite."""
     
-    def __init__(self):
-        import sqlite3
-        self.conn = sqlite3.connect(DB_PATH)
-        self.conn.row_factory = sqlite3.Row
-        self.cursor = None
+    def __init__(self, conn, cursor=None):
+        self.conn = conn
+        self.cursor = cursor
+        self._last_id = 0
     
-    def execute(self, query: str, params: tuple = ()) -> 'SQLiteConnection':
-        self.cursor = self.conn.cursor()
-        self.cursor.execute(query, params)
+    async def execute(self, query: str, params: tuple = ()) -> 'AsyncSQLiteConnection':
+        self.cursor = await self.conn.execute(query, params)
+        self._last_id = self.cursor.lastrowid
         return self
     
-    def commit(self):
-        self.conn.commit()
+    async def commit(self):
+        await self.conn.commit()
     
-    def close(self):
-        self.conn.close()
+    async def close(self):
+        await self.conn.close()
     
-    def fetchone(self) -> Optional[DatabaseRow]:
+    async def fetchone(self) -> Optional[DatabaseRow]:
         if self.cursor:
-            row = self.cursor.fetchone()
+            row = await self.cursor.fetchone()
             if row:
-                return DatabaseRow(dict(row))
+                # Get column names from cursor description
+                columns = [desc[0] for desc in self.cursor.description]
+                return DatabaseRow(dict(zip(columns, row)))
         return None
     
-    def fetchall(self) -> List[DatabaseRow]:
+    async def fetchall(self) -> List[DatabaseRow]:
         if self.cursor:
-            rows = self.cursor.fetchall()
-            return [DatabaseRow(dict(row)) for row in rows]
+            rows = await self.cursor.fetchall()
+            columns = [desc[0] for desc in self.cursor.description]
+            return [DatabaseRow(dict(zip(columns, row))) for row in rows]
         return []
     
     @property
     def lastrowid(self) -> int:
-        return self.cursor.lastrowid if self.cursor else 0
+        return self._last_id
 
 
-class MSSQLConnection(DatabaseConnection):
-    """MSSQL database connection wrapper using pyodbc."""
+class AsyncMSSQLConnection(AsyncDatabaseConnection):
+    """Async MSSQL database connection wrapper using aioodbc."""
     
     # Cache the detected driver to avoid repeated lookups and logging
     _detected_driver = None
+    
+    # Connection timeout errors that indicate session timeout
+    TIMEOUT_ERROR_CODES = [
+        '08S01',  # Communication link failure
+        '08001',  # Unable to connect
+        'HYT00',  # Timeout expired
+        '40001',  # Deadlock
+    ]
     
     @classmethod
     def _get_driver(cls):
@@ -172,13 +194,11 @@ class MSSQLConnection(DatabaseConnection):
         cls._detected_driver = "ODBC Driver 18 for SQL Server"
         return cls._detected_driver
     
-    def __init__(self):
-        import pyodbc
-        
-        driver = self._get_driver()
-        
-        # Build connection string
-        conn_str = (
+    @classmethod
+    def _get_connection_string(cls):
+        """Build the ODBC connection string."""
+        driver = cls._get_driver()
+        return (
             f"DRIVER={{{driver}}};"
             f"SERVER={MSSQL_HOST},{MSSQL_PORT};"
             f"DATABASE={MSSQL_DATABASE};"
@@ -187,11 +207,13 @@ class MSSQLConnection(DatabaseConnection):
             f"Encrypt={MSSQL_ENCRYPT};"
             f"TrustServerCertificate={MSSQL_TRUST_CERT};"
         )
-        
-        self.conn = pyodbc.connect(conn_str)
+    
+    def __init__(self, conn):
+        self.conn = conn
         self.cursor = None
         self._columns = []
         self._last_id = 0
+        self._retry_count = 0
     
     def _adapt_params(self, params: tuple) -> tuple:
         """Adapt parameter values for MSSQL compatibility."""
@@ -208,38 +230,105 @@ class MSSQLConnection(DatabaseConnection):
             adapted.append(p)
         return tuple(adapted)
     
-    def execute(self, query: str, params: tuple = ()) -> 'MSSQLConnection':
-        # Convert SQLite-style placeholders (?) to MSSQL-style (?)
-        # pyodbc also uses ? so this should work, but we need to handle some differences
+    @classmethod
+    def _is_connection_timeout(cls, error) -> bool:
+        """Check if the error is a connection/session timeout."""
+        error_str = str(error).upper()
         
-        # Handle SQLite-specific syntax
+        # Check for known error codes
+        for code in cls.TIMEOUT_ERROR_CODES:
+            if code in error_str:
+                return True
+        
+        # Check for timeout-related messages
+        timeout_keywords = [
+            'TIMEOUT', 'TIMED OUT', 'CONNECTION LOST',
+            'CONNECTION RESET', 'COMMUNICATION LINK FAILURE',
+            'LOGIN FAILED', 'CONNECTION FAILURE', 'NETWORK ERROR',
+            'BROKEN PIPE', 'CONNECTION CLOSED'
+        ]
+        for keyword in timeout_keywords:
+            if keyword in error_str:
+                return True
+        
+        return False
+    
+    async def execute(self, query: str, params: tuple = ()) -> 'AsyncMSSQLConnection':
+        """Execute a query with automatic retry on connection timeout."""
+        # Convert SQLite-style placeholders and syntax
         query = self._adapt_query(query)
         
         # Adapt parameters for MSSQL compatibility
         params = self._adapt_params(params)
         
-        self.cursor = self.conn.cursor()
+        retries = 0
+        last_error = None
         
-        if params:
-            self.cursor.execute(query, params)
-        else:
-            self.cursor.execute(query)
-        
-        # Get column names if available
-        if self.cursor.description:
-            self._columns = [column[0] for column in self.cursor.description]
-        
-        # Handle INSERT to get last row ID
-        if query.strip().upper().startswith('INSERT'):
+        while retries <= MAX_RETRIES:
             try:
-                self.cursor.execute("SELECT SCOPE_IDENTITY()")
-                result = self.cursor.fetchone()
-                if result and result[0]:
-                    self._last_id = int(result[0])
-            except:
-                pass
+                self.cursor = await self.conn.cursor()
+                
+                if params:
+                    await self.cursor.execute(query, params)
+                else:
+                    await self.cursor.execute(query)
+                
+                # Get column names if available
+                if self.cursor.description:
+                    self._columns = [column[0] for column in self.cursor.description]
+                
+                # Handle INSERT to get last row ID
+                if query.strip().upper().startswith('INSERT'):
+                    try:
+                        await self.cursor.execute("SELECT SCOPE_IDENTITY()")
+                        result = await self.cursor.fetchone()
+                        if result and result[0]:
+                            self._last_id = int(result[0])
+                    except:
+                        pass
+                
+                # Reset retry count on success
+                self._retry_count = 0
+                return self
+                
+            except Exception as e:
+                last_error = e
+                
+                if self._is_connection_timeout(e) and retries < MAX_RETRIES:
+                    retries += 1
+                    self._retry_count = retries
+                    logger.warning(f"Connection timeout detected, attempting reconnect (attempt {retries}/{MAX_RETRIES}): {e}")
+                    
+                    # Wait before retrying
+                    await asyncio.sleep(RETRY_DELAY * retries)
+                    
+                    # Try to reconnect
+                    try:
+                        await self._reconnect()
+                    except Exception as reconnect_error:
+                        logger.error(f"Reconnection failed: {reconnect_error}")
+                        # Continue to next retry attempt
+                else:
+                    # Not a timeout error or max retries exceeded
+                    raise
         
-        return self
+        # Max retries exceeded
+        raise last_error
+    
+    async def _reconnect(self):
+        """Attempt to reconnect to the database."""
+        import aioodbc
+        
+        # Close existing connection if possible
+        try:
+            await self.conn.close()
+        except:
+            pass
+        
+        # Create new connection
+        conn_str = self._get_connection_string()
+        self.conn = await aioodbc.connect(dsn=conn_str)
+        logger.info("Successfully reconnected to MSSQL database")
     
     def _adapt_query(self, query: str) -> str:
         """Adapt SQLite query syntax to MSSQL."""
@@ -285,22 +374,22 @@ class MSSQLConnection(DatabaseConnection):
         
         return query
     
-    def commit(self):
-        self.conn.commit()
+    async def commit(self):
+        await self.conn.commit()
     
-    def close(self):
-        self.conn.close()
+    async def close(self):
+        await self.conn.close()
     
-    def fetchone(self) -> Optional[DatabaseRow]:
+    async def fetchone(self) -> Optional[DatabaseRow]:
         if self.cursor:
-            row = self.cursor.fetchone()
+            row = await self.cursor.fetchone()
             if row:
                 return DatabaseRow(dict(zip(self._columns, row)))
         return None
     
-    def fetchall(self) -> List[DatabaseRow]:
+    async def fetchall(self) -> List[DatabaseRow]:
         if self.cursor:
-            rows = self.cursor.fetchall()
+            rows = await self.cursor.fetchall()
             return [DatabaseRow(dict(zip(self._columns, row))) for row in rows]
         return []
     
@@ -309,43 +398,43 @@ class MSSQLConnection(DatabaseConnection):
         return self._last_id
 
 
-def get_db_connection() -> DatabaseConnection:
-    """Get a database connection based on configuration."""
+async def get_db_connection() -> AsyncDatabaseConnection:
+    """Get an async database connection based on configuration."""
     if DB_TYPE == "mssql":
-        return MSSQLConnection()
+        import aioodbc
+        conn_str = AsyncMSSQLConnection._get_connection_string()
+        conn = await aioodbc.connect(dsn=conn_str)
+        return AsyncMSSQLConnection(conn)
     else:
-        return SQLiteConnection()
+        import aiosqlite
+        conn = await aiosqlite.connect(DB_PATH)
+        return AsyncSQLiteConnection(conn)
 
 
-def init_db():
+async def init_db():
     """Initialize the database with all required tables."""
-    conn = get_db_connection()
+    conn = await get_db_connection()
     
     try:
         if DB_TYPE == "mssql":
-            _init_mssql_tables(conn)
+            await _init_mssql_tables(conn)
         else:
-            _init_sqlite_tables(conn)
+            await _init_sqlite_tables(conn)
         
-        conn.commit()
+        await conn.commit()
         logger.info(f"Database initialized successfully ({DB_TYPE})")
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}")
         raise
     finally:
-        conn.close()
+        await conn.close()
 
 
-def _init_sqlite_tables(conn: DatabaseConnection):
+async def _init_sqlite_tables(conn: AsyncDatabaseConnection):
     """Initialize SQLite tables."""
-    import sqlite3
-    
-    # Use raw sqlite3 for schema creation
-    raw_conn = sqlite3.connect(DB_PATH)
-    c = raw_conn.cursor()
     
     # Users table
-    c.execute('''
+    await conn.execute('''
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
@@ -356,7 +445,7 @@ def _init_sqlite_tables(conn: DatabaseConnection):
     ''')
     
     # Models table
-    c.execute('''
+    await conn.execute('''
         CREATE TABLE IF NOT EXISTS models (
             id TEXT PRIMARY KEY,
             hf_repo_id TEXT NOT NULL,
@@ -370,7 +459,7 @@ def _init_sqlite_tables(conn: DatabaseConnection):
     ''')
     
     # Requests table
-    c.execute('''
+    await conn.execute('''
         CREATE TABLE IF NOT EXISTS requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             hf_repo_id TEXT NOT NULL,
@@ -382,7 +471,7 @@ def _init_sqlite_tables(conn: DatabaseConnection):
     ''')
     
     # OAuth users table
-    c.execute('''
+    await conn.execute('''
         CREATE TABLE IF NOT EXISTS oauth_users (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -395,7 +484,7 @@ def _init_sqlite_tables(conn: DatabaseConnection):
     ''')
     
     # Tickets table
-    c.execute('''
+    await conn.execute('''
         CREATE TABLE IF NOT EXISTS tickets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             request_id INTEGER NOT NULL,
@@ -407,7 +496,7 @@ def _init_sqlite_tables(conn: DatabaseConnection):
     ''')
     
     # Ticket messages table
-    c.execute('''
+    await conn.execute('''
         CREATE TABLE IF NOT EXISTS ticket_messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ticket_id INTEGER NOT NULL,
@@ -419,27 +508,15 @@ def _init_sqlite_tables(conn: DatabaseConnection):
         )
     ''')
     
-    # Migration: Add decline_reason column if it doesn't exist
-    try:
-        c.execute("ALTER TABLE requests ADD COLUMN decline_reason TEXT DEFAULT ''")
-    except sqlite3.OperationalError:
-        pass
-    
-    # Migration: Add role column to oauth_users if it doesn't exist
-    try:
-        c.execute("ALTER TABLE oauth_users ADD COLUMN role TEXT DEFAULT 'user'")
-    except sqlite3.OperationalError:
-        pass
-    
-    raw_conn.commit()
-    raw_conn.close()
+    # Migration: Add decline_reason column if it doesn't exist (handled by IF NOT EXISTS in schema)
+    # Migration: Add role column to oauth_users if it doesn't exist (handled by IF NOT EXISTS in schema)
 
 
-def _init_mssql_tables(conn: DatabaseConnection):
+async def _init_mssql_tables(conn: AsyncDatabaseConnection):
     """Initialize MSSQL tables."""
     
     # Users table
-    conn.execute('''
+    await conn.execute('''
         IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='users' AND xtype='U')
         CREATE TABLE users (
             id INT PRIMARY KEY IDENTITY(1,1),
@@ -449,10 +526,10 @@ def _init_mssql_tables(conn: DatabaseConnection):
             api_key NVARCHAR(255)
         )
     ''')
-    conn.commit()
+    await conn.commit()
     
     # Models table
-    conn.execute('''
+    await conn.execute('''
         IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='models' AND xtype='U')
         CREATE TABLE models (
             id NVARCHAR(255) PRIMARY KEY,
@@ -465,10 +542,10 @@ def _init_mssql_tables(conn: DatabaseConnection):
             completed_at DATETIME
         )
     ''')
-    conn.commit()
+    await conn.commit()
     
     # Requests table
-    conn.execute('''
+    await conn.execute('''
         IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='requests' AND xtype='U')
         CREATE TABLE requests (
             id INT PRIMARY KEY IDENTITY(1,1),
@@ -479,10 +556,10 @@ def _init_mssql_tables(conn: DatabaseConnection):
             created_at DATETIME DEFAULT GETDATE()
         )
     ''')
-    conn.commit()
+    await conn.commit()
     
     # OAuth users table
-    conn.execute('''
+    await conn.execute('''
         IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='oauth_users' AND xtype='U')
         CREATE TABLE oauth_users (
             id NVARCHAR(255) PRIMARY KEY,
@@ -494,20 +571,20 @@ def _init_mssql_tables(conn: DatabaseConnection):
             created_at DATETIME DEFAULT GETDATE()
         )
     ''')
-    conn.commit()
+    await conn.commit()
     
     # Migration: Add role column to oauth_users if it doesn't exist
     try:
-        conn.execute('''
+        await conn.execute('''
             IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'oauth_users' AND COLUMN_NAME = 'role')
             ALTER TABLE oauth_users ADD role NVARCHAR(50) DEFAULT 'user'
         ''')
-        conn.commit()
+        await conn.commit()
     except:
         pass
     
     # Tickets table
-    conn.execute('''
+    await conn.execute('''
         IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='tickets' AND xtype='U')
         CREATE TABLE tickets (
             id INT PRIMARY KEY IDENTITY(1,1),
@@ -518,10 +595,10 @@ def _init_mssql_tables(conn: DatabaseConnection):
             FOREIGN KEY (request_id) REFERENCES requests(id)
         )
     ''')
-    conn.commit()
+    await conn.commit()
     
     # Ticket messages table
-    conn.execute('''
+    await conn.execute('''
         IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='ticket_messages' AND xtype='U')
         CREATE TABLE ticket_messages (
             id INT PRIMARY KEY IDENTITY(1,1),
@@ -533,18 +610,15 @@ def _init_mssql_tables(conn: DatabaseConnection):
             FOREIGN KEY (ticket_id) REFERENCES tickets(id)
         )
     ''')
-    conn.commit()
+    await conn.commit()
 
 
-def test_connection() -> tuple[bool, str]:
+async def test_connection() -> tuple[bool, str]:
     """Test database connection. Returns (success, message)."""
     try:
-        conn = get_db_connection()
-        if DB_TYPE == "mssql":
-            conn.execute("SELECT 1")
-        else:
-            conn.execute("SELECT 1")
-        conn.close()
+        conn = await get_db_connection()
+        await conn.execute("SELECT 1")
+        await conn.close()
         return True, f"Successfully connected to {DB_TYPE} database"
     except Exception as e:
         return False, f"Failed to connect to {DB_TYPE} database: {str(e)}"

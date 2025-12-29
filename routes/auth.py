@@ -43,9 +43,10 @@ async def login_page(request: Request):
 
 @router.post("/login")
 async def login(username: str = Form(...), password: str = Form(...)):
-    conn = get_db_connection()
-    user = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
-    conn.close()
+    conn = await get_db_connection()
+    await conn.execute("SELECT * FROM users WHERE username = ?", (username,))
+    user = await conn.fetchone()
+    await conn.close()
     
     if user and pwd_context.verify(password, user['hashed_password']):
         response = RedirectResponse(url="/", status_code=302)
@@ -135,27 +136,28 @@ async def oauth_callback(code: str, state: str = None):
     role = "admin" if is_admin_user(username) else "user"
     
     # Save or update user in database
-    conn = get_db_connection()
-    existing = conn.execute("SELECT * FROM oauth_users WHERE id = ?", (hf_user_id,)).fetchone()
+    conn = await get_db_connection()
+    await conn.execute("SELECT * FROM oauth_users WHERE id = ?", (hf_user_id,))
+    existing = await conn.fetchone()
     
     if existing:
         # Update existing user - also update role in case admin list changed
-        conn.execute(
+        await conn.execute(
             "UPDATE oauth_users SET username = ?, email = ?, avatar_url = ?, session_token = ?, role = ? WHERE id = ?",
             (username, email, avatar_url, session_token, role, hf_user_id)
         )
         if role == "admin":
             logger.info(f"Admin user logged in: {username}")
     else:
-        conn.execute(
+        await conn.execute(
             "INSERT INTO oauth_users (id, username, email, avatar_url, session_token, role) VALUES (?, ?, ?, ?, ?, ?)",
             (hf_user_id, username, email, avatar_url, session_token, role)
         )
         if role == "admin":
             logger.info(f"New admin user created: {username}")
     
-    conn.commit()
-    conn.close()
+    await conn.commit()
+    await conn.close()
     
     # Set session cookie and redirect
     response = RedirectResponse(url="/", status_code=302)
@@ -168,10 +170,10 @@ async def oauth_logout(request: Request):
     """Clear OAuth session."""
     token = request.cookies.get("session_token")
     if token:
-        conn = get_db_connection()
-        conn.execute("UPDATE oauth_users SET session_token = NULL WHERE session_token = ?", (token,))
-        conn.commit()
-        conn.close()
+        conn = await get_db_connection()
+        await conn.execute("UPDATE oauth_users SET session_token = NULL WHERE session_token = ?", (token,))
+        await conn.commit()
+        await conn.close()
     
     response = RedirectResponse(url="/")
     response.delete_cookie("session_token")

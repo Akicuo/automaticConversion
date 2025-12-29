@@ -139,14 +139,15 @@ class SpamProtection:
                 self.submissions[username] = []
             self.submissions[username].append(time.time())
     
-    def check_pending_limit(self, username: str) -> tuple[bool, str]:
-        """Check if user has too many pending requests (sync DB check)."""
-        conn = get_db_connection()
-        result = conn.execute(
+    async def check_pending_limit(self, username: str) -> tuple[bool, str]:
+        """Check if user has too many pending requests (async DB check)."""
+        conn = await get_db_connection()
+        await conn.execute(
             "SELECT COUNT(*) as cnt FROM requests WHERE requested_by = ? AND status = 'pending'",
             (username,)
-        ).fetchone()
-        conn.close()
+        )
+        result = await conn.fetchone()
+        await conn.close()
         
         count = result['cnt'] if result else 0
         
