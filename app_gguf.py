@@ -42,8 +42,12 @@ class EndpointFilter(logging.Filter):
 uvicorn_access_logger = logging.getLogger("uvicorn.access")
 uvicorn_access_logger.addFilter(EndpointFilter([
     "/api/status/all",
+    "/api/status/model/",
     "/api/requests/all",
-    "/api/requests/my"
+    "/api/requests/my",
+    "/api/tickets/all",
+    "/api/tickets/my",
+    "/api/tickets/"
 ]))
 
 # Handle paths for PyInstaller (Frozen) vs Dev
@@ -233,7 +237,17 @@ async def security_middleware(request: Request, call_next):
         return await call_next(request)
     
     # Skip rate limiting for frequent polling endpoints
-    skip_rate_limit = path in ["/api/status/all", "/api/requests/all", "/api/requests/my"]
+    # These are called 2-4 times per second for live updates
+    polling_endpoints = [
+        "/api/status/all",
+        "/api/status/model/",  # Dynamic: /api/status/model/{id}
+        "/api/requests/all",
+        "/api/requests/my",
+        "/api/tickets/all",
+        "/api/tickets/my",
+        "/api/tickets/",  # Dynamic: /api/tickets/{id}/messages
+    ]
+    skip_rate_limit = any(path == ep or path.startswith(ep) for ep in polling_endpoints)
     
     if not skip_rate_limit:
         allowed, reason = await rate_limiter.is_allowed(client_ip)

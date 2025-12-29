@@ -19,3 +19,5 @@ torchvision
 pyodbc
 aiosqlite
 aioodbc
+protobuf
+# protobuf was missing and was causing issues with llama.cpp
