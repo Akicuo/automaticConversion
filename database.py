@@ -125,12 +125,42 @@ class SQLiteConnection(DatabaseConnection):
 class MSSQLConnection(DatabaseConnection):
     """MSSQL database connection wrapper using pyodbc."""
     
+    @staticmethod
+    def _get_driver():
+        """Auto-detect available ODBC driver or use environment override."""
+        # Allow override via environment variable
+        driver_override = os.getenv("MSSQL_DRIVER", "")
+        if driver_override:
+            return driver_override
+        
+        # Try to auto-detect available driver (prefer newer versions)
+        import pyodbc
+        drivers = pyodbc.drivers()
+        
+        # Check for drivers in order of preference
+        preferred_drivers = [
+            "ODBC Driver 18 for SQL Server",
+            "ODBC Driver 17 for SQL Server",
+            "ODBC Driver 13 for SQL Server",
+            "SQL Server",
+        ]
+        
+        for driver in preferred_drivers:
+            if driver in drivers:
+                logger.info(f"Using ODBC driver: {driver}")
+                return driver
+        
+        # Fallback to 18 if nothing found (will error with helpful message)
+        return "ODBC Driver 18 for SQL Server"
+    
     def __init__(self):
         import pyodbc
         
+        driver = self._get_driver()
+        
         # Build connection string
         conn_str = (
-            f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+            f"DRIVER={{{driver}}};"
             f"SERVER={MSSQL_HOST},{MSSQL_PORT};"
             f"DATABASE={MSSQL_DATABASE};"
             f"UID={MSSQL_USER};"
