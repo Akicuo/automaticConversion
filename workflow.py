@@ -135,7 +135,8 @@ class ModelWorkflow:
         return summary
 
     async def check_disk_space(self, required_gb: float):
-        total, used, free = shutil.disk_usage(CACHE_DIR)
+        loop = asyncio.get_event_loop()
+        total, used, free = await loop.run_in_executor(None, shutil.disk_usage, CACHE_DIR)
         free_gb = free / (2**30)
         await self.log(f"  Disk space check: Need {required_gb:.1f}GB, Available {free_gb:.1f}GB")
         if free_gb < required_gb:
@@ -147,7 +148,13 @@ class ModelWorkflow:
         try:
             hf_token = os.getenv("HF_TOKEN")
             api = HfApi(token=hf_token)
-            model_info = api.model_info(self.hf_repo_id, files_metadata=True)
+            
+            # Run blocking API call in executor
+            loop = asyncio.get_event_loop()
+            model_info = await loop.run_in_executor(
+                None,
+                lambda: api.model_info(self.hf_repo_id, files_metadata=True)
+            )
             
             total_bytes = 0
             if model_info.siblings:
@@ -164,22 +171,23 @@ class ModelWorkflow:
     async def cleanup(self):
         """Remove all downloaded and generated files."""
         await self.log("Starting cleanup...")
+        loop = asyncio.get_event_loop()
         try:
             # Remove downloaded model directory
             if self.model_dir and Path(self.model_dir).exists():
                 await self.log(f"Removing downloaded model: {self.model_dir}")
-                shutil.rmtree(self.model_dir, ignore_errors=True)
+                await loop.run_in_executor(None, lambda: shutil.rmtree(self.model_dir, ignore_errors=True))
             
             # Remove FP16 file
             if self.fp16_path and self.fp16_path.exists():
                 await self.log(f"Removing FP16 file: {self.fp16_path}")
-                self.fp16_path.unlink(missing_ok=True)
+                await loop.run_in_executor(None, lambda: self.fp16_path.unlink(missing_ok=True))
             
             # Remove all quantized files
             for q_path in self.quant_paths:
                 if q_path.exists():
                     await self.log(f"Removing quant file: {q_path}")
-                    q_path.unlink(missing_ok=True)
+                    await loop.run_in_executor(None, lambda p=q_path: p.unlink(missing_ok=True))
             
             await self.log("Cleanup completed.")
         except Exception as e:
@@ -200,7 +208,7 @@ class ModelWorkflow:
             await self.log("━━━ GGUF Forge Pipeline Started ━━━")
             await self.log(f"Job ID: {self.model_id}")
             await self.log(f"Model: {self.hf_repo_id}")
-            await self.log(f"Version: {get_app_version()}")
+            await self.log(f"Version: {await get_app_version()}")
             await self.log("")
             
             # 1. Setup Llama
@@ -290,7 +298,8 @@ class ModelWorkflow:
             
             if hf_token:
                 try:
-                    user_info = api.whoami()
+                    loop = asyncio.get_event_loop()
+                    user_info = await loop.run_in_executor(None, api.whoami)
                     hf_username = user_info.get("name") or user_info.get("user")
                     new_repo_id = f"{hf_username}/{quant_base_name}-GGUF"
                     await self.log(f"  Target repo: {new_repo_id}")
@@ -417,6 +426,9 @@ class ModelWorkflow:
             if hf_token and uploaded_files and new_repo_id:
                 await self.log("▶ STEP 5: Generating README...")
                 
+                # Get app version (async)
+                app_version = await get_app_version()
+                
                 # Get timing summary
                 timing = self.get_timing_summary()
                 total_time_str = self.format_duration(timing["total_time"])
@@ -454,7 +466,7 @@ The following quants are available:
 | Metric | Value |
 |--------|-------|
 | Job ID | `{self.model_id}` |
-| GGUF Forge Version | {get_app_version()} |
+| GGUF Forge Version | {app_version} |
 | Total Time | {total_time_str} |
 | Avg Time per Quant | {avg_quant_str} |
 
@@ -476,14 +488,18 @@ The following quants are available:
 
 
 ---
-*Converted automatically by [GGUF Forge](https://gguforge.com) {get_app_version()}*
+*Converted automatically by [GGUF Forge](https://gguforge.com) {app_version}*
 
 """
-                api.upload_file(
-                    path_or_fileobj=readme_content.encode('utf-8'),
-                    path_in_repo="README.md",
-                    repo_id=new_repo_id,
-                    repo_type="model"
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(
+                    None,
+                    lambda: api.upload_file(
+                        path_or_fileobj=readme_content.encode('utf-8'),
+                        path_in_repo="README.md",
+                        repo_id=new_repo_id,
+                        repo_type="model"
+                    )
                 )
                 await self.log(f"  ✓ README uploaded")
                 await self.log("")

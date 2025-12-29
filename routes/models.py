@@ -34,7 +34,7 @@ async def get_admin(request: Request):
 async def search_hf(q: str):
     mgr = HuggingFaceManager(token=os.getenv("HF_TOKEN"))
     try:
-        return mgr.search_models(q)
+        return await mgr.search_models(q)
     except Exception as e:
         return []
 

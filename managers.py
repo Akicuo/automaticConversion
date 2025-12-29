@@ -9,6 +9,7 @@ import platform
 import subprocess
 from pathlib import Path
 from typing import Optional
+from concurrent.futures import ThreadPoolExecutor
 
 from huggingface_hub import HfApi
 
@@ -17,6 +18,9 @@ logger = logging.getLogger("GGUF_Forge")
 # These will be set by main app
 LLAMA_CPP_DIR = None
 BASE_DIR = None
+
+# Thread pool for blocking operations
+_executor = ThreadPoolExecutor(max_workers=4)
 
 
 def set_paths(base_dir: Path, llama_cpp_dir: Path):
@@ -37,15 +41,16 @@ class LlamaCppManager:
         return shutil.which(tool_name) is not None
     
     @staticmethod
-    def has_nvidia_gpu() -> bool:
-        """Check if NVIDIA GPU is available."""
+    async def has_nvidia_gpu() -> bool:
+        """Check if NVIDIA GPU is available (async)."""
         try:
-            result = subprocess.run(
-                ["nvidia-smi"],
-                capture_output=True,
-                text=True
+            proc = await asyncio.create_subprocess_exec(
+                "nvidia-smi",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL
             )
-            return result.returncode == 0
+            returncode = await proc.wait()
+            return returncode == 0
         except FileNotFoundError:
             return False
     
@@ -91,7 +96,7 @@ class LlamaCppManager:
             raise Exception("CMake is not installed or not in PATH. Please install CMake.")
         
         # Check for CUDA support
-        has_cuda = LlamaCppManager.has_nvidia_gpu()
+        has_cuda = await LlamaCppManager.has_nvidia_gpu()
         if has_cuda:
             logger.info("NVIDIA GPU detected, building with CUDA support...")
         else:
@@ -219,31 +224,43 @@ class HuggingFaceManager:
     def __init__(self, token: Optional[str] = None):
         self.api = HfApi(token=token)
 
-    def search_models(self, query: str, limit: int = 10):
-        models = self.api.list_models(search=query, limit=limit, sort="likes", direction=-1)
+    async def search_models(self, query: str, limit: int = 10):
+        """Search for models on HuggingFace (async)."""
+        loop = asyncio.get_event_loop()
+        models = await loop.run_in_executor(
+            _executor,
+            lambda: list(self.api.list_models(search=query, limit=limit, sort="likes", direction=-1))
+        )
         return [{"id": m.modelId, "likes": m.likes} for m in models]
 
-    def check_exists(self, repo_id: str) -> bool:
+    async def check_exists(self, repo_id: str) -> bool:
+        """Check if a model exists on HuggingFace (async)."""
+        loop = asyncio.get_event_loop()
         try:
-            self.api.model_info(repo_id)
+            await loop.run_in_executor(
+                _executor,
+                lambda: self.api.model_info(repo_id)
+            )
             return True
         except:
             return False
 
 
-def get_app_version() -> str:
-    """Calculate app version based on git commit count * 0.1"""
+async def get_app_version() -> str:
+    """Calculate app version based on git commit count * 0.1 (async)."""
     try:
-        result = subprocess.run(
-            ["git", "rev-list", "--count", "HEAD"],
+        proc = await asyncio.create_subprocess_exec(
+            "git", "rev-list", "--count", "HEAD",
             cwd=BASE_DIR,
-            capture_output=True,
-            text=True
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL
         )
-        if result.returncode == 0:
-            commit_count = int(result.stdout.strip())
+        stdout, _ = await proc.communicate()
+        if proc.returncode == 0:
+            commit_count = int(stdout.decode().strip())
             version = commit_count * 0.1
             return f"v{version:.1f}"
     except Exception:
         pass
     return "v0.1"  # Fallback
+
