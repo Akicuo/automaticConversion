@@ -206,6 +206,8 @@ class MSSQLConnection(DatabaseConnection):
     
     def _adapt_query(self, query: str) -> str:
         """Adapt SQLite query syntax to MSSQL."""
+        import re
+        
         # Replace AUTOINCREMENT with IDENTITY
         query = query.replace("AUTOINCREMENT", "IDENTITY(1,1)")
         
@@ -233,6 +235,16 @@ class MSSQLConnection(DatabaseConnection):
             IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='{table_name}' AND xtype='U')
             {query.replace('CREATE TABLE IF NOT EXISTS', 'CREATE TABLE')}
             """
+        
+        # Handle LIMIT -> TOP (MSSQL uses TOP instead of LIMIT)
+        # Pattern: SELECT ... FROM ... LIMIT N  ->  SELECT TOP N ... FROM ...
+        limit_match = re.search(r'\bLIMIT\s+(\d+)\s*$', query, re.IGNORECASE)
+        if limit_match:
+            limit_num = limit_match.group(1)
+            # Remove the LIMIT clause
+            query = re.sub(r'\bLIMIT\s+\d+\s*$', '', query, flags=re.IGNORECASE)
+            # Add TOP after SELECT
+            query = re.sub(r'^(\s*SELECT\s+)', rf'\1TOP {limit_num} ', query, flags=re.IGNORECASE)
         
         return query
     
