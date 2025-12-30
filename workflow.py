@@ -15,6 +15,7 @@ from huggingface_hub import HfApi, snapshot_download, create_repo
 
 from database import get_db_connection
 from managers import LlamaCppManager, get_app_version
+from websocket_manager import broadcast_model_update
 
 # These will be set by main app
 CACHE_DIR = None
@@ -86,6 +87,12 @@ class ModelWorkflow:
             values = list(kwargs.values()) + [self.model_id]
             await conn.execute(f"UPDATE models SET {updates} WHERE id = ?", values)
             await conn.commit()
+            
+            # Fetch updated model data and broadcast via WebSocket
+            await conn.execute("SELECT * FROM models WHERE id = ?", (self.model_id,))
+            model_data = await conn.fetchone()
+            if model_data:
+                await broadcast_model_update(dict(model_data))
         finally:
             await conn.close()
 

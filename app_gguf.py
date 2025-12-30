@@ -9,7 +9,7 @@ import logging
 from pathlib import Path
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Depends, Request
+from fastapi import FastAPI, Depends, Request, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -84,6 +84,7 @@ from database import init_db, get_db_connection, set_db_path
 from security import RateLimiter, BotDetector, SpamProtection
 from managers import set_paths as set_manager_paths
 from workflow import set_workflow_config, running_workflows
+from websocket_manager import manager as ws_manager
 
 # Set paths for modules
 set_db_path(DB_PATH)
@@ -285,6 +286,29 @@ app.include_router(auth.router)
 app.include_router(models.router)
 app.include_router(requests.router)
 app.include_router(tickets.router)
+
+
+# --- WebSocket Endpoint ---
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """WebSocket endpoint for real-time updates."""
+    # Parse channels from query params
+    channels = websocket.query_params.getlist("channel")
+    if not channels:
+        channels = ["models"]  # Default to models channel
+    
+    await ws_manager.connect(websocket, channels)
+    try:
+        while True:
+            # Keep connection alive, handle incoming messages if needed
+            data = await websocket.receive_text()
+            # Client can send ping to keep alive
+            if data == "ping":
+                await websocket.send_text('{"type": "pong"}')
+    except WebSocketDisconnect:
+        await ws_manager.disconnect(websocket)
+    except Exception:
+        await ws_manager.disconnect(websocket)
 
 
 # --- Main Routes ---

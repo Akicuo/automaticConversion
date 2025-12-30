@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks
 
 from database import get_db_connection
 from models import TicketMessage, CreateTicketRequest
+from websocket_manager import broadcast_tickets_update, broadcast_requests_update, broadcast_my_requests_update
 
 router = APIRouter(prefix="/api/tickets")
 
@@ -67,6 +68,11 @@ async def create_ticket(data: CreateTicketRequest, request: Request, user = Depe
     
     await conn.commit()
     await conn.close()
+    
+    # Broadcast updates via WebSocket
+    await broadcast_tickets_update()
+    await broadcast_requests_update()
+    await broadcast_my_requests_update()
     
     return {"status": "created", "ticket_id": ticket_id}
 
@@ -175,6 +181,9 @@ async def reply_to_ticket(ticket_id: int, data: TicketMessage, request: Request)
     await conn.commit()
     await conn.close()
     
+    # Broadcast update via WebSocket
+    await broadcast_tickets_update()
+    
     return {"status": "sent"}
 
 
@@ -202,6 +211,11 @@ async def close_ticket(ticket_id: int, user = Depends(get_admin)):
     
     await conn.commit()
     await conn.close()
+    
+    # Broadcast updates via WebSocket
+    await broadcast_tickets_update()
+    await broadcast_requests_update()
+    await broadcast_my_requests_update()
     
     return {"status": "closed"}
 
@@ -249,6 +263,11 @@ async def approve_ticket(ticket_id: int, background_tasks: BackgroundTasks, user
     workflow = ModelWorkflow(new_id, hf_repo_id)
     background_tasks.add_task(workflow.run_pipeline)
     
+    # Broadcast updates via WebSocket
+    await broadcast_tickets_update()
+    await broadcast_requests_update()
+    await broadcast_my_requests_update()
+    
     return {"status": "approved", "model_id": new_id}
 
 
@@ -289,6 +308,11 @@ async def reopen_ticket(ticket_id: int, request: Request):
     
     await conn.commit()
     await conn.close()
+    
+    # Broadcast updates via WebSocket
+    await broadcast_tickets_update()
+    await broadcast_requests_update()
+    await broadcast_my_requests_update()
     
     return {"status": "reopened"}
 

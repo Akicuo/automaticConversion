@@ -836,13 +836,172 @@
         }
     });
 
-    setInterval(fetchStatus, 2000);
-    setInterval(fetchRequests, 5000);
-    setInterval(fetchMyRequests, 5000);
-    setInterval(fetchTickets, 5000);
-    fetchStatus();
-    fetchRequests();
-    fetchMyRequests();
-    fetchTickets();
+    // ====== WEBSOCKET REAL-TIME UPDATES ======
+    let ws = null;
+    let wsReconnectAttempts = 0;
+    const maxReconnectAttempts = 10;
+    const reconnectDelay = 3000;
+
+    function connectWebSocket() {
+        // Determine WebSocket URL (ws:// or wss://)
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}/ws?channel=models&channel=requests&channel=tickets&channel=my_requests`;
+
+        ws = new WebSocket(wsUrl);
+
+        ws.onopen = () => {
+            console.log('WebSocket connected');
+            wsReconnectAttempts = 0;
+            // Initial data fetch on connect
+            fetchStatus();
+            fetchRequests();
+            fetchMyRequests();
+            fetchTickets();
+        };
+
+        ws.onmessage = (event) => {
+            try {
+                const msg = JSON.parse(event.data);
+                handleWebSocketMessage(msg);
+            } catch (e) {
+                console.error('Failed to parse WebSocket message:', e);
+            }
+        };
+
+        ws.onclose = (event) => {
+            console.log('WebSocket closed:', event.code, event.reason);
+            ws = null;
+            // Attempt to reconnect
+            if (wsReconnectAttempts < maxReconnectAttempts) {
+                wsReconnectAttempts++;
+                console.log(`Reconnecting WebSocket (attempt ${wsReconnectAttempts})...`);
+                setTimeout(connectWebSocket, reconnectDelay);
+            } else {
+                console.error('Max WebSocket reconnect attempts reached. Falling back to polling.');
+                startPollingFallback();
+            }
+        };
+
+        ws.onerror = (error) => {
+            console.error('WebSocket error:', error);
+        };
+
+        // Send periodic pings to keep connection alive
+        setInterval(() => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send('ping');
+            }
+        }, 30000);
+    }
+
+    function handleWebSocketMessage(msg) {
+        const { channel, data } = msg;
+
+        if (!data) return;
+
+        switch (data.type) {
+            case 'model_update':
+                // Single model update - update just that model in the UI
+                updateSingleModel(data.model);
+                break;
+            case 'models_list':
+                // Full models list update
+                renderModels(data.models);
+                break;
+            case 'requests_update':
+                // Requests changed - refresh
+                fetchRequests();
+                break;
+            case 'tickets_update':
+                // Tickets changed - refresh
+                fetchTickets();
+                break;
+            case 'my_requests_update':
+                // User's requests changed - refresh
+                fetchMyRequests();
+                break;
+            case 'pong':
+                // Ping response - connection is alive
+                break;
+            default:
+                console.log('Unknown WebSocket message type:', data.type);
+        }
+    }
+
+    function updateSingleModel(model) {
+        // Try to update existing model card, or trigger a full refresh
+        const container = document.getElementById('models-list');
+        const existingCard = container.querySelector(`.model-card[data-model-id="${model.id}"]`);
+
+        if (existingCard) {
+            // Update existing card
+            existingCard.querySelector('.model-name').textContent = model.hf_repo_id;
+
+            const badge = existingCard.querySelector('.status-badge');
+            badge.textContent = model.status.toUpperCase();
+
+            if (model.status === 'error') badge.style.color = 'var(--error)';
+            else if (model.status === 'complete') badge.style.color = 'var(--success)';
+            else if (model.status === 'terminated') badge.style.color = '#ff8c00';
+            else if (model.status === 'interrupted') badge.style.color = '#fbbf24';
+            else badge.style.color = '';
+
+            existingCard.querySelector('.progress-bar-fill').style.width = `${model.progress}%`;
+
+            const logsEl = existingCard.querySelector('.logs');
+            const tolerance = 50;
+            const shouldAutoScroll = (logsEl.scrollHeight - logsEl.scrollTop - logsEl.clientHeight) <= tolerance;
+
+            if (logsEl.textContent !== model.log) {
+                logsEl.textContent = model.log;
+                if (shouldAutoScroll) {
+                    logsEl.scrollTop = logsEl.scrollHeight;
+                }
+            }
+
+            const errorSection = existingCard.querySelector('.error-section');
+            if (model.error_details) {
+                errorSection.style.display = 'block';
+                errorSection.textContent = model.error_details.slice(0, 500);
+            } else {
+                errorSection.style.display = 'none';
+            }
+
+            // Update buttons visibility
+            if (isAdmin) {
+                const deleteBtn = existingCard.querySelector('.delete-btn');
+                const terminateBtn = existingCard.querySelector('.terminate-btn');
+
+                deleteBtn.onclick = () => deleteModel(model.id, model.hf_repo_id);
+                terminateBtn.onclick = () => terminateModel(model.id, model.hf_repo_id);
+
+                const runningStatuses = ['pending', 'initializing', 'downloading', 'converting', 'quantizing', 'uploading'];
+                if (runningStatuses.includes(model.status)) {
+                    terminateBtn.style.display = 'inline-block';
+                    deleteBtn.style.display = 'none';
+                } else if (['error', 'complete', 'terminated', 'interrupted'].includes(model.status)) {
+                    terminateBtn.style.display = 'none';
+                    deleteBtn.style.display = 'inline-block';
+                } else {
+                    terminateBtn.style.display = 'none';
+                    deleteBtn.style.display = 'none';
+                }
+            }
+        } else {
+            // New model - fetch all to get proper ordering
+            fetchStatus();
+        }
+    }
+
+    function startPollingFallback() {
+        console.log('Starting polling fallback...');
+        setInterval(fetchStatus, 3000);
+        setInterval(fetchRequests, 5000);
+        setInterval(fetchMyRequests, 5000);
+        setInterval(fetchTickets, 5000);
+    }
+
+    // Initialize WebSocket connection
+    connectWebSocket();
 </script>
 {% endblock %}

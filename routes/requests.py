@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks
 from database import get_db_connection
 from models import ModelRequestSubmit, RejectRequest
 from workflow import ModelWorkflow
+from websocket_manager import broadcast_requests_update, broadcast_my_requests_update
 
 router = APIRouter(prefix="/api/requests")
 
@@ -71,6 +72,10 @@ async def submit_request(req: ModelRequestSubmit, request: Request):
     # Record submission for rate limiting
     await _spam_protection.record_submission(requester)
     
+    # Broadcast update via WebSocket
+    await broadcast_requests_update()
+    await broadcast_my_requests_update()
+    
     return {"status": "submitted", "message": "Your request has been submitted for admin review."}
 
 
@@ -112,6 +117,10 @@ async def approve_request(request_id: int, background_tasks: BackgroundTasks, us
     workflow = ModelWorkflow(new_id, hf_repo_id)
     background_tasks.add_task(workflow.run_pipeline)
     
+    # Broadcast update via WebSocket
+    await broadcast_requests_update()
+    await broadcast_my_requests_update()
+    
     return {"status": "approved", "model_id": new_id}
 
 
@@ -123,6 +132,11 @@ async def reject_request(request_id: int, body: RejectRequest = None, user = Dep
     await conn.execute("UPDATE requests SET status = 'rejected', decline_reason = ? WHERE id = ?", (reason, request_id))
     await conn.commit()
     await conn.close()
+    
+    # Broadcast update via WebSocket
+    await broadcast_requests_update()
+    await broadcast_my_requests_update()
+    
     return {"status": "rejected"}
 
 
