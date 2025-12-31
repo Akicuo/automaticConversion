@@ -75,7 +75,7 @@ async def get_all_status():
     await conn.execute("SELECT * FROM models ORDER BY created_at DESC LIMIT 50")
     models = await conn.fetchall()
     await conn.close()
-    return [dict(m) for m in models]
+    return [m.to_dict() for m in models]
 
 
 @router.get("/status/model/{model_id}")
@@ -86,7 +86,7 @@ async def get_model_status(model_id: str):
     await conn.close()
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
-    return dict(model)
+    return model.to_dict()
 
 
 @router.delete("/models/{model_id}")

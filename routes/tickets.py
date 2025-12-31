@@ -106,7 +106,7 @@ async def get_ticket_by_request(request_id: int, request: Request):
         return {"ticket": None}
     
     await conn.close()
-    return {"ticket": dict(ticket)}
+    return {"ticket": ticket.to_dict()}
 
 
 @router.get("/{ticket_id}/messages")
@@ -141,7 +141,7 @@ async def get_ticket_messages(ticket_id: int, request: Request):
     messages = await conn.fetchall()
     await conn.close()
     
-    return {"messages": [dict(m) for m in messages], "ticket": dict(ticket), "request": dict(req)}
+    return {"messages": [m.to_dict() for m in messages], "ticket": ticket.to_dict(), "request": req.to_dict()}
 
 
 @router.post("/{ticket_id}/reply")
@@ -329,7 +329,7 @@ async def get_all_tickets(user = Depends(get_admin)):
     """)
     tickets = await conn.fetchall()
     await conn.close()
-    return [dict(t) for t in tickets]
+    return [t.to_dict() for t in tickets]
 
 
 @router.get("/my")
@@ -349,4 +349,4 @@ async def get_my_tickets(request: Request):
     """, (user['username'],))
     tickets = await conn.fetchall()
     await conn.close()
-    return [dict(t) for t in tickets]
+    return [t.to_dict() for t in tickets]

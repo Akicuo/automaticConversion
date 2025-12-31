@@ -92,7 +92,7 @@ class ModelWorkflow:
             await conn.execute("SELECT * FROM models WHERE id = ?", (self.model_id,))
             model_data = await conn.fetchone()
             if model_data:
-                await broadcast_model_update(dict(model_data))
+                await broadcast_model_update(model_data.to_dict())
         finally:
             await conn.close()
 

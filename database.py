@@ -67,6 +67,17 @@ class DatabaseRow:
     
     def items(self):
         return self._data.items()
+    
+    def to_dict(self) -> dict:
+        """Convert to a plain dict with datetime objects serialized to ISO format strings."""
+        from datetime import datetime
+        result = {}
+        for key, value in self._data.items():
+            if isinstance(value, datetime):
+                result[key] = value.isoformat()
+            else:
+                result[key] = value
+        return result
 
 
 class AsyncDatabaseConnection(ABC):
@@ -173,8 +184,15 @@ class AsyncMSSQLConnection(AsyncDatabaseConnection):
             return driver_override
         
         # Try to auto-detect available driver (prefer newer versions)
-        import pyodbc
-        drivers = pyodbc.drivers()
+        try:
+            import pyodbc
+            drivers = pyodbc.drivers()
+        except ImportError as e:
+            raise ImportError(
+                "Missing ODBC Python package. This should have been installed with requirements.txt.\n"
+                "Try: pip install pyodbc\n\n"
+                f"Original error: {str(e)}"
+            ) from e
         
         # Check for drivers in order of preference
         preferred_drivers = [
@@ -190,7 +208,15 @@ class AsyncMSSQLConnection(AsyncDatabaseConnection):
                 logger.info(f"Using ODBC driver: {driver}")
                 return driver
         
-        # Fallback to 18 if nothing found (will error with helpful message)
+        # No driver found - provide helpful error message
+        available_drivers = ", ".join(drivers) if drivers else "none"
+        logger.warning(
+            f"No Microsoft SQL Server ODBC driver found. Available drivers: {available_drivers}\n"
+            "Please install the Microsoft ODBC Driver for SQL Server.\n"
+            "See: https://docs.microsoft.com/en-us/sql/connect/odbc/download-odbc-driver-for-sql-server"
+        )
+        
+        # Fallback to 18 if nothing found (will error with helpful message later)
         cls._detected_driver = "ODBC Driver 18 for SQL Server"
         return cls._detected_driver
     
@@ -401,7 +427,25 @@ class AsyncMSSQLConnection(AsyncDatabaseConnection):
 async def get_db_connection() -> AsyncDatabaseConnection:
     """Get an async database connection based on configuration."""
     if DB_TYPE == "mssql":
-        import aioodbc
+        try:
+            import aioodbc
+        except ImportError as e:
+            error_msg = str(e)
+            if "libodbc" in error_msg:
+                raise ImportError(
+                    "Missing ODBC system libraries. Please install unixODBC and the Microsoft ODBC Driver.\n\n"
+                    "On Ubuntu/Debian:\n"
+                    "  sudo apt-get update\n"
+                    "  sudo apt-get install -y unixodbc-dev unixodbc\n"
+                    "  curl https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -\n"
+                    "  curl https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list\n"
+                    "  sudo apt-get update\n"
+                    "  sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18\n\n"
+                    "Alternatively, switch to SQLite by setting DB_TYPE=sqlite in your environment.\n\n"
+                    f"Original error: {error_msg}"
+                ) from e
+            raise
+        
         conn_str = AsyncMSSQLConnection._get_connection_string()
         conn = await aioodbc.connect(dsn=conn_str)
         return AsyncMSSQLConnection(conn)

@@ -4,10 +4,18 @@ WebSocket manager for real-time updates in GGUF Forge.
 import json
 import asyncio
 import logging
+from datetime import datetime
 from typing import Dict, Set, Any
 from fastapi import WebSocket, WebSocketDisconnect
 
 logger = logging.getLogger("GGUF_Forge")
+
+
+def json_serializer(obj):
+    """JSON serializer for objects not serializable by default json code."""
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    raise TypeError(f"Type {type(obj)} not serializable")
 
 
 class ConnectionManager:
@@ -46,7 +54,7 @@ class ConnectionManager:
         if channel not in self.active_connections:
             return
         
-        message = json.dumps({"channel": channel, "data": data})
+        message = json.dumps({"channel": channel, "data": data}, default=json_serializer)
         dead_connections = set()
         
         async with self._lock:

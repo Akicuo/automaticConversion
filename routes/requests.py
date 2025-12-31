@@ -86,7 +86,7 @@ async def get_all_requests(user = Depends(get_admin)):
     await conn.execute("SELECT * FROM requests ORDER BY created_at DESC")
     requests = await conn.fetchall()
     await conn.close()
-    return [dict(r) for r in requests]
+    return [r.to_dict() for r in requests]
 
 
 @router.post("/{request_id}/approve")
@@ -155,4 +155,4 @@ async def get_my_requests(request: Request):
     )
     requests = await conn.fetchall()
     await conn.close()
-    return [dict(r) for r in requests]
+    return [r.to_dict() for r in requests]

@@ -1,5 +1,5 @@
 fastapi
-uvicorn
+uvicorn[standard]
 jinja2
 python-dotenv
 huggingface_hub
