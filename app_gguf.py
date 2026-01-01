@@ -371,4 +371,4 @@ async def get_db_info(request: Request):
 if __name__ == "__main__":
     import uvicorn
     print("Starting GGUF Forge...")
-    uvicorn.run("app_gguf:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("app_gguf:app", host="0.0.0.0", port=8000, reload=False)
