@@ -61,7 +61,21 @@ else:
 TEMPLATES_DIR = BUNDLE_DIR / "templates"
 STATIC_DIR = BUNDLE_DIR / "static"
 CACHE_DIR = BASE_DIR / ".cache"
-LLAMA_CPP_DIR = BASE_DIR / "llama.cpp"
+
+# Llama.cpp directory - configurable via LLAMA_CPP_DIR environment variable
+llama_cpp_env = os.getenv("LLAMA_CPP_DIR", "")
+if llama_cpp_env:
+    # Use environment variable - support both relative and absolute paths
+    llama_cpp_path = Path(llama_cpp_env)
+    if llama_cpp_path.is_absolute():
+        LLAMA_CPP_DIR = llama_cpp_path
+    else:
+        # Relative path - resolve relative to BASE_DIR
+        LLAMA_CPP_DIR = (BASE_DIR / llama_cpp_path).resolve()
+else:
+    # Default: llama.cpp subdirectory
+    LLAMA_CPP_DIR = BASE_DIR / "llama.cpp"
+
 DB_PATH = BASE_DIR / "gguf_app.db"
 
 CACHE_DIR.mkdir(exist_ok=True)

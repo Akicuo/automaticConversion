@@ -129,6 +129,11 @@ When these users login via HuggingFace OAuth, they automatically get admin privi
 You can also set these environment variables (they have defaults):
 - `PORT`: Server port (default: 8000)
 - `HOST`: Server host (default: 0.0.0.0)
+- `LLAMA_CPP_DIR`: Path to llama.cpp directory (default: `./llama.cpp`)
+  - Can be **relative** (e.g., `../llama.cpp`, `custom/llama.cpp`) or **absolute** (e.g., `/opt/llama.cpp`, `C:\tools\llama.cpp`)
+  - Relative paths are resolved from the project root directory
+  - Useful if you want to share a single llama.cpp installation across multiple projects
+  - Example: `LLAMA_CPP_DIR=/opt/llama.cpp` or `LLAMA_CPP_DIR=../shared/llama.cpp`
 - `PARALLEL_QUANT_JOBS`: Number of simultaneous quantization jobs (default: 2)
   - `1` = Sequential (original behavior, slowest but safest)
   - `2` = Default (balanced, recommended for most systems)

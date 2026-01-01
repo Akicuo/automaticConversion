@@ -25,6 +25,8 @@ MSSQL_USER = os.getenv("MSSQL_USER", "")
 MSSQL_PASSWORD = os.getenv("MSSQL_PASSWORD", "")
 MSSQL_ENCRYPT = os.getenv("MSSQL_ENCRYPT", "yes")
 MSSQL_TRUST_CERT = os.getenv("MSSQL_TRUST_CERT", "yes")
+MSSQL_CONN_TIMEOUT = os.getenv("MSSQL_CONN_TIMEOUT", "60")  # Connection timeout in seconds
+MSSQL_LOGIN_TIMEOUT = os.getenv("MSSQL_LOGIN_TIMEOUT", "60")  # Login timeout in seconds
 
 # Connection retry settings
 MAX_RETRIES = 3
@@ -222,7 +224,7 @@ class AsyncMSSQLConnection(AsyncDatabaseConnection):
     
     @classmethod
     def _get_connection_string(cls):
-        """Build the ODBC connection string."""
+        """Build the ODBC connection string with timeout and keepalive settings."""
         driver = cls._get_driver()
         return (
             f"DRIVER={{{driver}}};"
@@ -232,6 +234,8 @@ class AsyncMSSQLConnection(AsyncDatabaseConnection):
             f"PWD={MSSQL_PASSWORD};"
             f"Encrypt={MSSQL_ENCRYPT};"
             f"TrustServerCertificate={MSSQL_TRUST_CERT};"
+            f"Connection Timeout={MSSQL_CONN_TIMEOUT};"
+            f"Login Timeout={MSSQL_LOGIN_TIMEOUT};"
         )
     
     def __init__(self, conn):

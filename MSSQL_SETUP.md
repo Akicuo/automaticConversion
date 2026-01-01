@@ -132,6 +132,10 @@ MSSQL_PASSWORD=your_password
 MSSQL_ENCRYPT=yes
 MSSQL_TRUST_CERT=yes
 
+# Optional: Connection timeout settings (in seconds)
+MSSQL_CONN_TIMEOUT=60
+MSSQL_LOGIN_TIMEOUT=60
+
 # Optional: Manually specify ODBC driver
 # MSSQL_DRIVER=ODBC Driver 18 for SQL Server
 ```
@@ -183,6 +187,25 @@ The Microsoft ODBC driver is not installed. Follow the installation steps above 
 2. **Check server address**: Verify the MSSQL_HOST is correct
 3. **Check credentials**: Verify username and password
 4. **SSL/TLS issues**: Try setting `MSSQL_TRUST_CERT=yes` if using self-signed certificates
+5. **Timeout issues**: If you're experiencing disconnections during long-running jobs, increase the timeout values:
+   ```env
+   MSSQL_CONN_TIMEOUT=120
+   MSSQL_LOGIN_TIMEOUT=120
+   ```
+
+### Session Timeout / Getting Logged Out
+
+If you're experiencing automatic logouts during long-running conversion jobs:
+
+1. **This is typically a MSSQL server-side setting**, not an application issue
+2. **Server-side connection pooling** or firewall may be closing idle connections
+3. **Solutions**:
+   - Increase `MSSQL_CONN_TIMEOUT` and `MSSQL_LOGIN_TIMEOUT` in your `.env` file (default: 60 seconds)
+   - Check your MSSQL server's "Remote Query Timeout" setting (default: 600 seconds)
+   - Check your Azure SQL firewall rules if using Azure
+   - Verify no network devices (routers, load balancers) are timing out idle connections
+
+The application already has automatic retry logic for connection timeouts, but persistent session issues are usually server-side configuration.
 
 ### TypeError: Object of type datetime is not JSON serializable
 
