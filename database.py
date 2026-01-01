@@ -247,16 +247,29 @@ class AsyncMSSQLConnection(AsyncDatabaseConnection):
     
     def _adapt_params(self, params: tuple) -> tuple:
         """Adapt parameter values for MSSQL compatibility."""
+        from datetime import datetime as dt
+        import re
+        
         if not params:
             return params
         
         adapted = []
         for p in params:
+            # Convert datetime objects directly - pyodbc handles these properly
+            if isinstance(p, dt):
+                # Pass datetime objects as-is, pyodbc will handle conversion
+                adapted.append(p)
+                continue
+            
             if isinstance(p, str):
-                # Convert ISO datetime format (2025-12-29T07:02:59) to MSSQL format (2025-12-29 07:02:59)
+                # Convert ISO datetime format (2025-12-29T07:02:59.123456) to MSSQL format
                 # Check if it looks like an ISO datetime
                 if len(p) >= 19 and p[4] == '-' and p[7] == '-' and p[10] == 'T':
+                    # Replace T with space
                     p = p.replace('T', ' ')
+                    # Truncate microseconds to milliseconds (SQL Server DATETIME only supports 3 decimal places)
+                    # Match pattern like ".123456" and truncate to ".123"
+                    p = re.sub(r'\.(\d{3})\d*', r'.\1', p)
             adapted.append(p)
         return tuple(adapted)
     

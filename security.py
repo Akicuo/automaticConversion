@@ -134,10 +134,23 @@ class SpamProtection:
     async def record_submission(self, username: str):
         """Record a new submission."""
         import time
+        now = time.time()
         async with self.lock:
             if username not in self.submissions:
                 self.submissions[username] = []
-            self.submissions[username].append(time.time())
+            self.submissions[username].append(now)
+            # Keep only last hour to prevent memory bloat
+            self.submissions[username] = [t for t in self.submissions[username] if now - t < 3600]
+    
+    async def cleanup(self):
+        """Remove old entries to prevent memory bloat."""
+        import time
+        now = time.time()
+        async with self.lock:
+            for user in list(self.submissions.keys()):
+                self.submissions[user] = [t for t in self.submissions[user] if now - t < 3600]
+                if not self.submissions[user]:
+                    del self.submissions[user]
     
     async def check_pending_limit(self, username: str) -> tuple[bool, str]:
         """Check if user has too many pending requests (async DB check)."""

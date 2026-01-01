@@ -123,3 +123,21 @@ async def broadcast_my_requests_update():
     await manager.broadcast("my_requests", {
         "type": "my_requests_update"
     })
+
+
+async def broadcast_transfer_progress(model_id: str, transfer_type: str, files: list):
+    """
+    Broadcast download/upload progress for a model.
+    
+    Args:
+        model_id: The model job ID
+        transfer_type: 'download' or 'upload'
+        files: List of dicts with file progress info:
+               [{"name": "file.safetensors", "progress": 45, "speed": "12.5MB/s", "size": "5.00G"}]
+    """
+    await manager.broadcast("models", {
+        "type": "transfer_progress",
+        "model_id": model_id,
+        "transfer_type": transfer_type,
+        "files": files
+    })

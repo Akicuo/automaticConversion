@@ -200,7 +200,7 @@ async def close_ticket(ticket_id: int, user = Depends(get_admin)):
     
     await conn.execute(
         "UPDATE tickets SET status = 'closed', closed_at = ? WHERE id = ?",
-        (datetime.now().isoformat(), ticket_id)
+        (datetime.now(), ticket_id)
     )
     
     # Also update the request status
@@ -244,7 +244,7 @@ async def approve_ticket(ticket_id: int, background_tasks: BackgroundTasks, user
     # Close the ticket
     await conn.execute(
         "UPDATE tickets SET status = 'closed', closed_at = ? WHERE id = ?",
-        (datetime.now().isoformat(), ticket_id)
+        (datetime.now(), ticket_id)
     )
     
     # Approve the request

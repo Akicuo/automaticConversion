@@ -135,6 +135,95 @@
             background: rgba(239, 68, 68, 0.2);
             color: #f87171;
         }
+
+        /* Transfer progress animations */
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.6; }
+        }
+
+        @keyframes shimmer {
+            0% { background-position: -200% 0; }
+            100% { background-position: 200% 0; }
+        }
+
+        .transfer-progress .transfer-files::-webkit-scrollbar {
+            width: 4px;
+        }
+
+        .transfer-progress .transfer-files::-webkit-scrollbar-track {
+            background: rgba(255,255,255,0.05);
+            border-radius: 2px;
+        }
+
+        .transfer-progress .transfer-files::-webkit-scrollbar-thumb {
+            background: rgba(255,255,255,0.2);
+            border-radius: 2px;
+        }
+
+        .transfer-progress .transfer-files::-webkit-scrollbar-thumb:hover {
+            background: rgba(255,255,255,0.3);
+        }
+
+        /* ===== MOBILE RESPONSIVE STYLES ===== */
+        @media (max-width: 768px) {
+            .container {
+                padding: 1rem;
+            }
+
+            header {
+                padding: 1rem 0;
+            }
+
+            header .container {
+                flex-wrap: wrap;
+                gap: 0.5rem;
+            }
+
+            h1 {
+                font-size: 1rem;
+            }
+
+            header nav {
+                flex-wrap: wrap;
+                gap: 0.5rem !important;
+                font-size: 0.85rem !important;
+            }
+
+            header nav img {
+                width: 24px !important;
+                height: 24px !important;
+            }
+
+            button.primary {
+                padding: 0.5rem 1rem;
+                font-size: 0.85rem;
+            }
+
+            .status-badge {
+                font-size: 0.7rem;
+                padding: 0.2rem 0.5rem;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .container {
+                padding: 0.75rem;
+            }
+
+            h1 {
+                font-size: 0.95rem;
+            }
+
+            header nav {
+                font-size: 0.8rem !important;
+            }
+
+            button.primary {
+                padding: 0.45rem 0.9rem;
+                font-size: 0.8rem;
+            }
+        }
     </style>
     {% block head %}{% endblock %}
 </head>

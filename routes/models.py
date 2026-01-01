@@ -127,6 +127,6 @@ async def terminate_model(model_id: str, user = Depends(get_admin)):
     
     # Terminate the running workflow
     workflow = running_workflows[model_id]
-    workflow.terminate()
+    await workflow.terminate()
     
     return {"status": "terminating", "message": "Termination signal sent. Job will stop shortly."}

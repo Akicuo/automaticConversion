@@ -6,6 +6,7 @@ import os
 import sys
 import secrets
 import logging
+import asyncio
 from pathlib import Path
 from contextlib import asynccontextmanager
 
@@ -225,7 +226,26 @@ API Key: {key}
             print(f"Failed to write creds.txt: {e}")
             
     await conn.close()
-    yield
+
+    # Background cleanup loop for in-memory rate/spam limiters (prevents memory bloat on bot traffic)
+    async def _security_cleanup_loop():
+        while True:
+            try:
+                await rate_limiter.cleanup()
+                await spam_protection.cleanup()
+            except Exception:
+                logger.exception("Security cleanup loop error")
+            await asyncio.sleep(60)
+
+    cleanup_task = asyncio.create_task(_security_cleanup_loop())
+    try:
+        yield
+    finally:
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except Exception:
+            pass
 
 
 # --- FastAPI App ---
@@ -306,11 +326,69 @@ app.include_router(tickets.router)
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for real-time updates."""
+    # --- Basic security for WebSockets (middleware doesn't run for WS) ---
+    # Get client IP (handle proxies)
+    forwarded_for = websocket.headers.get("x-forwarded-for")
+    if forwarded_for:
+        client_ip = forwarded_for.split(",")[0].strip()
+    else:
+        client_ip = websocket.client.host if websocket.client else "unknown"
+
+    user_agent = websocket.headers.get("user-agent", "")
+
+    # Rate limit WS handshakes to reduce bot churn
+    allowed, reason = await rate_limiter.is_allowed(client_ip)
+    if not allowed:
+        try:
+            await websocket.close(code=1008, reason=reason)
+        finally:
+            return
+
+    # Bot detection (treat WS like a browser route)
+    is_bot, bot_reason = bot_detector.is_suspicious(user_agent, "/ws")
+    if is_bot:
+        logger.warning(f"Bot detected (ws): {client_ip} - {user_agent[:50]} - {bot_reason}")
+        try:
+            await websocket.close(code=1008, reason="Access denied")
+        finally:
+            return
+
+    # Resolve user from session cookie (can't reuse Request-based dependency here)
+    async def get_ws_user():
+        token = websocket.cookies.get("session_token")
+        if not token:
+            return None
+        conn = await get_db_connection()
+        try:
+            # Admin users (legacy)
+            await conn.execute("SELECT *, 'admin' as user_type FROM users WHERE api_key = ?", (token,))
+            row = await conn.fetchone()
+            if row:
+                return row
+            # OAuth users
+            await conn.execute("SELECT *, 'oauth' as user_type FROM oauth_users WHERE session_token = ?", (token,))
+            return await conn.fetchone()
+        finally:
+            await conn.close()
+
+    user = await get_ws_user()
+
     # Parse channels from query params
-    channels = websocket.query_params.getlist("channel")
+    requested_channels = websocket.query_params.getlist("channel")
+    if not requested_channels:
+        requested_channels = ["models"]  # Default to models channel
+
+    # Restrict channels based on user role
+    allowed_channels = {"models"}
+    if user:
+        allowed_channels.add("my_requests")
+        if user.get("role") == "admin":
+            allowed_channels.update({"requests", "tickets"})
+
+    channels = [c for c in requested_channels if c in allowed_channels]
     if not channels:
-        channels = ["models"]  # Default to models channel
-    
+        channels = ["models"]
+
     await ws_manager.connect(websocket, channels)
     try:
         while True:

@@ -42,7 +42,7 @@ async def login_page(request: Request):
 
 
 @router.post("/login")
-async def login(username: str = Form(...), password: str = Form(...)):
+async def login(request: Request, username: str = Form(...), password: str = Form(...)):
     conn = await get_db_connection()
     await conn.execute("SELECT * FROM users WHERE username = ?", (username,))
     user = await conn.fetchone()
@@ -50,10 +50,17 @@ async def login(username: str = Form(...), password: str = Form(...)):
     
     if user and pwd_context.verify(password, user['hashed_password']):
         response = RedirectResponse(url="/", status_code=302)
-        response.set_cookie(key="session_token", value=user['api_key'])
+        response.set_cookie(
+            key="session_token",
+            value=user["api_key"],
+            httponly=True,
+            samesite="lax",
+            secure=(request.url.scheme == "https"),
+            max_age=86400 * 7,  # 7 days
+        )
         return response
     
-    return templates.TemplateResponse("login.html", {"request": {}, "error": "Invalid credentials"})
+    return templates.TemplateResponse("login.html", {"request": request, "error": "Invalid credentials"})
 
 
 @router.get("/logout")
@@ -82,7 +89,7 @@ async def oauth_login():
 
 
 @router.get("/auth/callback")
-async def oauth_callback(code: str, state: str = None):
+async def oauth_callback(request: Request, code: str, state: str = None):
     """Handle HuggingFace OAuth callback."""
     import logging
     logger = logging.getLogger("GGUF_Forge")
@@ -161,7 +168,14 @@ async def oauth_callback(code: str, state: str = None):
     
     # Set session cookie and redirect
     response = RedirectResponse(url="/", status_code=302)
-    response.set_cookie(key="session_token", value=session_token, httponly=True, max_age=86400*7)  # 7 days
+    response.set_cookie(
+        key="session_token",
+        value=session_token,
+        httponly=True,
+        samesite="lax",
+        secure=(request.url.scheme == "https"),
+        max_age=86400 * 7,  # 7 days
+    )
     return response
 
 

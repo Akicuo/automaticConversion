@@ -11,11 +11,12 @@ from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
-from huggingface_hub import HfApi, snapshot_download, create_repo
+from huggingface_hub import HfApi, snapshot_download, create_repo, hf_hub_download
+from huggingface_hub.utils import tqdm as hf_tqdm
 
 from database import get_db_connection
 from managers import LlamaCppManager, get_app_version
-from websocket_manager import broadcast_model_update
+from websocket_manager import broadcast_model_update, broadcast_transfer_progress
 
 # These will be set by main app
 CACHE_DIR = None
@@ -48,20 +49,25 @@ class ModelWorkflow:
         self.start_time = None
         self.step_times = {}  # step_name -> (start, end)
         self.quant_times = []  # list of (q_type, duration_seconds)
+        # Transfer progress tracking
+        self.transfer_files = {}  # filename -> {"progress": 0, "size": "", "speed": ""}
         # Termination support
         self.terminated = False
         self.running_processes: List[asyncio.subprocess.Process] = []
     
-    def terminate(self):
+    async def terminate(self):
         """Request termination of this workflow."""
         self.terminated = True
-        self.log("⚠ TERMINATION REQUESTED - Stopping workflow...")
+        await self.log("⚠ TERMINATION REQUESTED - Stopping workflow...")
         # Kill any running processes
-        for proc in self.running_processes:
+        for proc in list(self.running_processes):
             try:
                 proc.terminate()
             except Exception:
-                pass
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
     
     def check_terminated(self):
         """Check if terminated and raise exception if so."""
@@ -140,6 +146,24 @@ class ModelWorkflow:
             summary["avg_quant_time"] = avg_time
         
         return summary
+    
+    async def update_transfer_progress(self, filename: str, progress: int, size: str = "", speed: str = "", transfer_type: str = "download"):
+        """Update and broadcast transfer progress for a file."""
+        self.transfer_files[filename] = {
+            "name": filename,
+            "progress": progress,
+            "size": size,
+            "speed": speed
+        }
+        
+        # Broadcast the current transfer state
+        files_list = list(self.transfer_files.values())
+        await broadcast_transfer_progress(self.model_id, transfer_type, files_list)
+    
+    def clear_transfer_progress(self):
+        """Clear transfer progress tracking."""
+        self.transfer_files = {}
+        return
 
     async def check_disk_space(self, required_gb: float):
         loop = asyncio.get_event_loop()
@@ -244,18 +268,76 @@ class ModelWorkflow:
             model_size_gb = await self.get_model_size_gb()
             await self.log(f"  Model size: {model_size_gb:.2f}GB")
             required_gb = max(5.0, model_size_gb * 3)
-            await self.check_disk_space(required_gb) 
+            await self.check_disk_space(required_gb)
             
-            # Run download in thread pool to avoid blocking
+            # Clear any previous transfer progress
+            self.clear_transfer_progress()
+            
+            # Get list of files to download
+            api = HfApi()
             loop = asyncio.get_event_loop()
-            self.model_dir = await loop.run_in_executor(
-                None,
-                lambda: snapshot_download(
-                    repo_id=self.hf_repo_id, 
-                    local_dir=CACHE_DIR / self.hf_repo_id, 
-                    local_dir_use_symlinks=False
+            try:
+                repo_files = await loop.run_in_executor(
+                    None,
+                    lambda: api.list_repo_files(self.hf_repo_id)
                 )
-            )
+                # Filter for model files (safetensors, bin, json, etc.)
+                download_files = [f for f in repo_files if any(f.endswith(ext) for ext in 
+                    ['.safetensors', '.bin', '.pt', '.pth', '.json', '.txt', '.model', '.tiktoken', '.py'])]
+                
+                await self.log(f"  Found {len(download_files)} files to download")
+                
+                # Download files with progress tracking
+                local_dir = CACHE_DIR / self.hf_repo_id
+                local_dir.mkdir(parents=True, exist_ok=True)
+                
+                total_files = len(download_files)
+                for idx, filename in enumerate(download_files):
+                    self.check_terminated()
+                    short_name = filename.split('/')[-1] if '/' in filename else filename
+                    
+                    # Initialize progress for this file
+                    await self.update_transfer_progress(short_name, 0, "", "Starting...", "download")
+                    
+                    # Download file in thread pool
+                    try:
+                        await loop.run_in_executor(
+                            None,
+                            lambda f=filename: hf_hub_download(
+                                repo_id=self.hf_repo_id,
+                                filename=f,
+                                local_dir=local_dir,
+                                local_dir_use_symlinks=False
+                            )
+                        )
+                        # Mark as complete
+                        await self.update_transfer_progress(short_name, 100, "", "Complete", "download")
+                    except Exception as e:
+                        await self.log(f"  ⚠ Failed to download {short_name}: {e}")
+                        await self.update_transfer_progress(short_name, -1, "", "Failed", "download")
+                    
+                    # Update overall progress (10-30% for download step)
+                    step_progress = 10 + int((idx + 1) / total_files * 20)
+                    await self.progress(step_progress)
+                
+                self.model_dir = str(local_dir)
+                
+            except Exception as e:
+                # Fallback to snapshot_download if file listing fails
+                await self.log(f"  Using batch download...")
+                self.model_dir = await loop.run_in_executor(
+                    None,
+                    lambda: snapshot_download(
+                        repo_id=self.hf_repo_id, 
+                        local_dir=CACHE_DIR / self.hf_repo_id, 
+                        local_dir_use_symlinks=False
+                    )
+                )
+            
+            # Clear download progress display
+            self.clear_transfer_progress()
+            await broadcast_transfer_progress(self.model_id, "download", [])
+            
             await self.log(f"  ✓ Downloaded to {self.model_dir}")
             self.end_step("download")
             await self.progress(30)
@@ -275,6 +357,7 @@ class ModelWorkflow:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT
             )
+            self.running_processes.append(process)
             
             async for line in process.stdout:
                 decoded = line.decode().strip()
@@ -282,6 +365,10 @@ class ModelWorkflow:
                     await self.log(f"  {decoded}")
             
             returncode = await process.wait()
+            try:
+                self.running_processes.remove(process)
+            except ValueError:
+                pass
             
             if returncode != 0:
                 raise Exception("Conversion to GGUF failed. Check logs for details.")
@@ -363,7 +450,12 @@ class ModelWorkflow:
                             stderr=asyncio.subprocess.PIPE,
                             env=env
                         )
+                        self.running_processes.append(process)
                         stdout, stderr = await process.communicate()
+                        try:
+                            self.running_processes.remove(process)
+                        except ValueError:
+                            pass
                         
                         quant_duration = time.time() - quant_start
                         
@@ -390,29 +482,58 @@ class ModelWorkflow:
             if hf_token and new_repo_id and successful_quants:
                 await self.status("uploading")
                 await self.log("▶ STEP 4b: Uploading all quantized files...")
-                await self.log(f"  Uploading {len(successful_quants)} files concurrently...")
+                await self.log(f"  Uploading {len(successful_quants)} files...")
                 
-                def upload_single_file(q_type, q_path):
-                    """Upload a single file - runs in thread pool"""
+                # Clear transfer progress and set up for upload tracking
+                self.clear_transfer_progress()
+                
+                # Initialize all files as pending
+                for q_type, q_path in successful_quants:
+                    filename = f"{quant_base_name}.{q_type}.gguf"
+                    file_size = q_path.stat().st_size if q_path.exists() else 0
+                    size_str = f"{file_size / (1024**3):.2f}GB" if file_size > 0 else ""
+                    await self.update_transfer_progress(filename, 0, size_str, "Queued", "upload")
+                
+                async def upload_with_progress(q_type, q_path):
+                    """Upload a single file with progress tracking"""
+                    filename = f"{quant_base_name}.{q_type}.gguf"
+                    file_size = q_path.stat().st_size if q_path.exists() else 0
+                    size_str = f"{file_size / (1024**3):.2f}GB" if file_size > 0 else ""
+                    
                     try:
-                        api.upload_file(
-                            path_or_fileobj=q_path,
-                            path_in_repo=f"{quant_base_name}.{q_type}.gguf",
-                            repo_id=new_repo_id,
-                            repo_type="model"
+                        # Update status to uploading
+                        await self.update_transfer_progress(filename, 0, size_str, "Uploading...", "upload")
+                        
+                        # Run upload in thread pool
+                        loop = asyncio.get_event_loop()
+                        await loop.run_in_executor(
+                            None,
+                            lambda: api.upload_file(
+                                path_or_fileobj=q_path,
+                                path_in_repo=filename,
+                                repo_id=new_repo_id,
+                                repo_type="model"
+                            )
                         )
+                        
+                        # Mark as complete
+                        await self.update_transfer_progress(filename, 100, size_str, "Complete", "upload")
                         return (q_type, True, None)
                     except Exception as e:
+                        await self.update_transfer_progress(filename, -1, size_str, "Failed", "upload")
                         return (q_type, False, str(e))
                 
-                # Upload all files concurrently using ThreadPoolExecutor
-                loop = asyncio.get_event_loop()
-                with ThreadPoolExecutor(max_workers=4) as executor:
-                    upload_tasks = [
-                        loop.run_in_executor(executor, upload_single_file, q_type, q_path)
-                        for q_type, q_path in successful_quants
-                    ]
-                    results = await asyncio.gather(*upload_tasks)
+                # Upload files with some concurrency (not too aggressive to avoid rate limits)
+                upload_sem = asyncio.Semaphore(2)  # Max 2 concurrent uploads
+                
+                async def upload_with_semaphore(q_type, q_path):
+                    async with upload_sem:
+                        return await upload_with_progress(q_type, q_path)
+                
+                results = await asyncio.gather(*[
+                    upload_with_semaphore(q_type, q_path) 
+                    for q_type, q_path in successful_quants
+                ])
                 
                 for q_type, success, error in results:
                     if success:
@@ -420,6 +541,10 @@ class ModelWorkflow:
                         await self.log(f"      ✓ {q_type} uploaded")
                     else:
                         await self.log(f"      ⚠ {q_type} upload failed: {error}")
+                
+                # Clear upload progress display
+                self.clear_transfer_progress()
+                await broadcast_transfer_progress(self.model_id, "upload", [])
                 
                 await self.log(f"  ✓ Uploaded {len(uploaded_files)}/{len(successful_quants)} files")
             elif successful_quants:
@@ -523,7 +648,7 @@ The following quants are available:
                 await self.log(f"✓ Avg Time per Quant: {self.format_duration(timing['avg_quant_time'])}")
             if new_repo_id:
                 await self.log(f"✓ Uploaded to: https://huggingface.co/{new_repo_id}")
-            await self._update_db(completed_at=datetime.now().isoformat())
+            await self._update_db(completed_at=datetime.now())
 
         except Exception as e:
             error_details = traceback.format_exc()
