@@ -272,6 +272,8 @@
             <div class="model-card-actions" style="display: flex; align-items: center; gap: 0.75rem;">
                 <span class="status-badge"
                     style="font-family: monospace; letter-spacing: 0.05em; font-size: 0.75rem;">Status</span>
+                <button class="continue-btn"
+                    style="display: none; background: var(--success); color: #000; border: none; padding: 0.25rem 0.5rem; border-radius: 4px; cursor: pointer; font-size: 0.7rem; font-weight: 500;">Continue</button>
                 <button class="terminate-btn"
                     style="display: none; background: transparent; color: #ff8c00; border: 1px solid #ff8c00; padding: 0.25rem 0.5rem; border-radius: 4px; cursor: pointer; font-size: 0.7rem;">Terminate</button>
                 <button class="delete-btn"
@@ -546,26 +548,36 @@
                 errorSection.style.display = 'none';
             }
 
-            // Delete button setup
+            // Button setup
             if (isAdmin) {
                 const deleteBtn = card.querySelector('.delete-btn');
                 const terminateBtn = card.querySelector('.terminate-btn');
+                const continueBtn = card.querySelector('.continue-btn');
 
                 // Update click handlers
                 deleteBtn.onclick = () => deleteModel(model.id, model.hf_repo_id);
                 terminateBtn.onclick = () => terminateModel(model.id, model.hf_repo_id);
+                continueBtn.onclick = () => continueModel(model.id, model.hf_repo_id);
 
                 // Show terminate for running jobs
                 const runningStatuses = ['pending', 'initializing', 'downloading', 'converting', 'quantizing', 'uploading'];
                 if (runningStatuses.includes(model.status)) {
                     terminateBtn.style.display = 'inline-block';
                     deleteBtn.style.display = 'none';
-                } else if (model.status === 'error' || model.status === 'complete' || model.status === 'terminated' || model.status === 'interrupted') {
+                    continueBtn.style.display = 'none';
+                } else if (model.status === 'interrupted') {
+                    // Show Continue button for interrupted jobs
                     terminateBtn.style.display = 'none';
                     deleteBtn.style.display = 'inline-block';
+                    continueBtn.style.display = 'inline-block';
+                } else if (model.status === 'error' || model.status === 'complete' || model.status === 'terminated') {
+                    terminateBtn.style.display = 'none';
+                    deleteBtn.style.display = 'inline-block';
+                    continueBtn.style.display = 'none';
                 } else {
                     terminateBtn.style.display = 'none';
                     deleteBtn.style.display = 'none';
+                    continueBtn.style.display = 'none';
                 }
             }
         });
@@ -604,6 +616,23 @@
             }
         } catch (e) {
             alert('Failed to terminate model');
+        }
+    }
+
+    async function continueModel(modelId, modelName) {
+        if (!confirm(`Continue interrupted job for "${modelName}"?\n\nThis will resume quantization from where it left off.`)) return;
+
+        try {
+            const res = await fetch(`/api/models/${modelId}/continue`, { method: 'POST' });
+            const data = await res.json();
+            if (res.ok) {
+                alert(data.message || 'Job resumed.');
+                fetchStatus();
+            } else {
+                alert('Failed to continue: ' + (data.detail || 'Unknown error'));
+            }
+        } catch (e) {
+            alert('Failed to continue model');
         }
     }
 
@@ -1232,20 +1261,29 @@
             if (isAdmin) {
                 const deleteBtn = existingCard.querySelector('.delete-btn');
                 const terminateBtn = existingCard.querySelector('.terminate-btn');
+                const continueBtn = existingCard.querySelector('.continue-btn');
 
                 deleteBtn.onclick = () => deleteModel(model.id, model.hf_repo_id);
                 terminateBtn.onclick = () => terminateModel(model.id, model.hf_repo_id);
+                continueBtn.onclick = () => continueModel(model.id, model.hf_repo_id);
 
                 const runningStatuses = ['pending', 'initializing', 'downloading', 'converting', 'quantizing', 'uploading'];
                 if (runningStatuses.includes(model.status)) {
                     terminateBtn.style.display = 'inline-block';
                     deleteBtn.style.display = 'none';
-                } else if (['error', 'complete', 'terminated', 'interrupted'].includes(model.status)) {
+                    continueBtn.style.display = 'none';
+                } else if (model.status === 'interrupted') {
                     terminateBtn.style.display = 'none';
                     deleteBtn.style.display = 'inline-block';
+                    continueBtn.style.display = 'inline-block';
+                } else if (['error', 'complete', 'terminated'].includes(model.status)) {
+                    terminateBtn.style.display = 'none';
+                    deleteBtn.style.display = 'inline-block';
+                    continueBtn.style.display = 'none';
                 } else {
                     terminateBtn.style.display = 'none';
                     deleteBtn.style.display = 'none';
+                    continueBtn.style.display = 'none';
                 }
             }
         } else {

@@ -3,10 +3,11 @@ Model conversion workflow for GGUF Forge.
 """
 import os
 import sys
+import json
 import shutil
 import asyncio
 import traceback
-from typing import List
+from typing import List, Optional
 from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
@@ -37,8 +38,13 @@ def set_workflow_config(cache_dir: Path, llama_cpp_dir: Path, quants: list, para
     PARALLEL_QUANT_JOBS = parallel_jobs
 
 
+def get_quants_list():
+    """Get the list of quants to process."""
+    return QUANTS
+
+
 class ModelWorkflow:
-    def __init__(self, model_id: str, hf_repo_id: str):
+    def __init__(self, model_id: str, hf_repo_id: str, resume_mode: bool = False, completed_quants: Optional[List[str]] = None):
         self.model_id = model_id
         self.hf_repo_id = hf_repo_id
         self.log_buffer = []
@@ -54,6 +60,13 @@ class ModelWorkflow:
         # Termination support
         self.terminated = False
         self.running_processes: List[asyncio.subprocess.Process] = []
+        # Resume support
+        self.resume_mode = resume_mode
+        self.completed_quants: List[str] = completed_quants or []  # Quants that have been uploaded already
+        # For tracking the HF repo (needed for resume)
+        self.new_repo_id = None
+        self.hf_token = None
+        self.api = None
     
     async def terminate(self):
         """Request termination of this workflow."""
@@ -101,6 +114,24 @@ class ModelWorkflow:
                 await broadcast_model_update(model_data.to_dict())
         finally:
             await conn.close()
+    
+    async def save_completed_quant(self, q_type: str):
+        """Save a completed quant to the database for resume capability."""
+        if q_type not in self.completed_quants:
+            self.completed_quants.append(q_type)
+        await self._update_db(completed_quants=json.dumps(self.completed_quants))
+    
+    async def cleanup_safetensors(self):
+        """Remove downloaded safetensors model directory to free up space."""
+        if self.model_dir and Path(self.model_dir).exists():
+            await self.log("  Cleaning up safetensors model to free disk space...")
+            loop = asyncio.get_event_loop()
+            try:
+                await loop.run_in_executor(None, lambda: shutil.rmtree(self.model_dir, ignore_errors=True))
+                await self.log("  ✓ Safetensors model cleaned up")
+                self.model_dir = None
+            except Exception as e:
+                await self.log(f"  ⚠ Failed to cleanup safetensors: {e}")
 
     def start_step(self, step_name: str):
         """Start timing a step."""
@@ -228,7 +259,6 @@ class ModelWorkflow:
         import time
         import multiprocessing
         error_details = ""
-        new_repo_id = None
         try:
             # Register in global registry for termination support
             running_workflows[self.model_id] = self
@@ -376,186 +406,174 @@ class ModelWorkflow:
             await self.log(f"  ✓ FP16 conversion complete: {self.fp16_path.name}")
             self.end_step("convert")
             await self.progress(50)
+            
+            # Clean up safetensors immediately - only the GGUF file is needed for quantization
+            await self.cleanup_safetensors()
             await self.log("")
 
-            # 4. Quantize
+            # 4. Quantize and Upload (each quant is uploaded immediately after creation, then deleted)
             self.check_terminated()
             self.start_step("quantize")
             await self.status("quantizing")
-            await self.log("▶ STEP 4: Quantizing to all formats...")
+            await self.log("▶ STEP 4: Quantizing and uploading each format...")
             quant_base_name = self.hf_repo_id.split("/")[-1]
-            hf_token = os.getenv("HF_TOKEN")
+            self.hf_token = os.getenv("HF_TOKEN")
             
             # Get current user's HuggingFace username to create repo under their account
-            api = HfApi(token=hf_token)
-            new_repo_id = None
+            self.api = HfApi(token=self.hf_token)
             
-            if hf_token:
+            if self.hf_token:
                 try:
                     loop = asyncio.get_event_loop()
-                    user_info = await loop.run_in_executor(None, api.whoami)
+                    user_info = await loop.run_in_executor(None, self.api.whoami)
                     hf_username = user_info.get("name") or user_info.get("user")
-                    new_repo_id = f"{hf_username}/{quant_base_name}-GGUF"
-                    await self.log(f"  Target repo: {new_repo_id}")
+                    self.new_repo_id = f"{hf_username}/{quant_base_name}-GGUF"
+                    await self.log(f"  Target repo: {self.new_repo_id}")
                     loop = asyncio.get_event_loop()
                     await loop.run_in_executor(
                         None,
-                        lambda: create_repo(new_repo_id, repo_type="model", token=hf_token, exist_ok=True)
+                        lambda: create_repo(self.new_repo_id, repo_type="model", token=self.hf_token, exist_ok=True)
                     )
-                    await self.log(f"  ✓ Repo ready: https://huggingface.co/{new_repo_id}")
+                    await self.log(f"  ✓ Repo ready: https://huggingface.co/{self.new_repo_id}")
                 except Exception as e:
                     await self.log(f"  ⚠ Could not create repo: {e}")
-                    new_repo_id = None
+                    self.new_repo_id = None
             else:
                 await self.log("  ⚠ No HF_TOKEN set - files will be quantized but not uploaded")
 
             await self.log("")
-            successful_quants = []  # List of (q_type, q_path) tuples
+            uploaded_files = []  # List of quant types that were uploaded
+            
+            # Determine which quants to process (skip already completed ones in resume mode)
+            quants_to_process = [q for q in QUANTS if q not in self.completed_quants]
+            
+            if self.resume_mode and self.completed_quants:
+                await self.log(f"  📋 Resume mode: {len(self.completed_quants)} quants already completed")
+                await self.log(f"     Already done: {', '.join(self.completed_quants)}")
+                await self.log(f"     Remaining: {len(quants_to_process)} quants to process")
+                uploaded_files = list(self.completed_quants)  # Count already uploaded as successful
+                await self.log("")
             
             total_quants = len(QUANTS)
+            completed_count = len(self.completed_quants)
             
-            # Detect CPU cores and split for parallel jobs
+            # Detect CPU cores
             total_cores = multiprocessing.cpu_count()
-            parallel_jobs = max(1, min(PARALLEL_QUANT_JOBS, total_quants))
-            cores_per_job = max(1, total_cores // parallel_jobs)
-            
-            if parallel_jobs == 1:
-                await self.log(f"  CPU cores: {total_cores} total (sequential mode)")
-            else:
-                await self.log(f"  CPU cores: {total_cores} total, {cores_per_job} per quantization job")
-                await self.log(f"  Running {parallel_jobs} quantizations in parallel")
+            await self.log(f"  CPU cores: {total_cores} total")
+            await self.log(f"  Mode: Sequential quantize → upload → delete (saves disk space)")
             await self.log("")
             
-            # Run quantizations with configured parallelism
-            sem = asyncio.Semaphore(parallel_jobs)
-            
-            async def quantize_single(idx, q_type):
-                async with sem:
-                    await self.log(f"  [{idx+1}/{total_quants}] Starting {q_type}...")
-                    q_path = CACHE_DIR / f"{quant_base_name}.{q_type}.gguf"
-                    self.quant_paths.append(q_path)
+            # Process quants one at a time: quantize → upload → delete
+            for idx, q_type in enumerate(quants_to_process):
+                self.check_terminated()
+                
+                overall_idx = QUANTS.index(q_type) + 1
+                await self.log(f"  [{overall_idx}/{total_quants}] Processing {q_type}...")
+                
+                q_path = CACHE_DIR / f"{quant_base_name}.{q_type}.gguf"
+                
+                quant_start = time.time()
+                
+                try:
+                    # === QUANTIZE ===
+                    env = os.environ.copy()
+                    if quantize_bin and quantize_bin.parent:
+                        current_ld = env.get('LD_LIBRARY_PATH', '')
+                        env['LD_LIBRARY_PATH'] = f"{quantize_bin.parent}:{current_ld}"
+                    env['OMP_NUM_THREADS'] = str(total_cores)
+                    env['MKL_NUM_THREADS'] = str(total_cores)
+                    env['OPENBLAS_NUM_THREADS'] = str(total_cores)
                     
-                    quant_start = time.time()
-                    
+                    process = await asyncio.create_subprocess_exec(
+                        str(quantize_bin), str(self.fp16_path), str(q_path), q_type,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        env=env
+                    )
+                    self.running_processes.append(process)
+                    stdout, stderr = await process.communicate()
                     try:
-                        # Set environment to limit thread usage
-                        env = os.environ.copy()
-                        env['OMP_NUM_THREADS'] = str(cores_per_job)
-                        env['MKL_NUM_THREADS'] = str(cores_per_job)
-                        env['OPENBLAS_NUM_THREADS'] = str(cores_per_job)
+                        self.running_processes.remove(process)
+                    except ValueError:
+                        pass
+                    
+                    quant_duration = time.time() - quant_start
+                    
+                    if process.returncode != 0:
+                        await self.log(f"      ⚠ {q_type} quantization failed: {stderr.decode()[:200]}")
+                        continue
+                    
+                    self.quant_times.append((q_type, quant_duration))
+                    await self.log(f"      ✓ Quantized ({self.format_duration(quant_duration)})")
+                    
+                    # === UPLOAD ===
+                    if self.hf_token and self.new_repo_id:
+                        self.check_terminated()
                         
-                        process = await asyncio.create_subprocess_exec(
-                            str(quantize_bin), str(self.fp16_path), str(q_path), q_type,
-                            stdout=asyncio.subprocess.PIPE,
-                            stderr=asyncio.subprocess.PIPE,
-                            env=env
-                        )
-                        self.running_processes.append(process)
-                        stdout, stderr = await process.communicate()
+                        filename = f"{quant_base_name}.{q_type}.gguf"
+                        file_size = q_path.stat().st_size if q_path.exists() else 0
+                        size_str = f"{file_size / (1024**3):.2f}GB" if file_size > 0 else ""
+                        
+                        await self.update_transfer_progress(filename, 0, size_str, "Uploading...", "upload")
+                        
                         try:
-                            self.running_processes.remove(process)
-                        except ValueError:
-                            pass
-                        
-                        quant_duration = time.time() - quant_start
-                        
-                        if process.returncode != 0:
-                            await self.log(f"      ⚠ {q_type} failed: {stderr.decode()[:100]}")
-                        else:
-                            self.quant_times.append((q_type, quant_duration))
-                            await self.log(f"      ✓ {q_type} ready ({self.format_duration(quant_duration)})")
-                            successful_quants.append((q_type, q_path))
-                            # Update progress
-                            step_progress = 50 + int(len(successful_quants) / total_quants * 30)
-                            await self.progress(step_progress)
+                            loop = asyncio.get_event_loop()
+                            await loop.run_in_executor(
+                                None,
+                                lambda: self.api.upload_file(
+                                    path_or_fileobj=q_path,
+                                    path_in_repo=filename,
+                                    repo_id=self.new_repo_id,
+                                    repo_type="model"
+                                )
+                            )
+                            
+                            await self.update_transfer_progress(filename, 100, size_str, "Complete", "upload")
+                            await self.log(f"      ✓ Uploaded to HuggingFace")
+                            uploaded_files.append(q_type)
+                            
+                            # Save progress to DB for resume capability
+                            await self.save_completed_quant(q_type)
+                            
+                        except Exception as e:
+                            await self.update_transfer_progress(filename, -1, size_str, "Failed", "upload")
+                            await self.log(f"      ⚠ Upload failed: {e}")
+                            # Don't delete the file if upload failed - keep for retry
+                            continue
+                    else:
+                        await self.log(f"      ℹ Skipping upload (no HF token)")
+                        uploaded_files.append(q_type)  # Count as "done" for progress
+                    
+                    # === DELETE QUANT FILE ===
+                    try:
+                        loop = asyncio.get_event_loop()
+                        await loop.run_in_executor(None, lambda: q_path.unlink(missing_ok=True))
+                        await self.log(f"      ✓ Deleted local file")
                     except Exception as e:
-                        await self.log(f"      ⚠ {q_type} error: {e}")
-
-            # Launch all quantization jobs (controlled by PARALLEL_QUANT_JOBS semaphore)
-            await asyncio.gather(*(quantize_single(i, q) for i, q in enumerate(QUANTS)))
+                        await self.log(f"      ⚠ Failed to delete: {e}")
+                    
+                    # Clear transfer progress
+                    self.clear_transfer_progress()
+                    await broadcast_transfer_progress(self.model_id, "upload", [])
+                    
+                except Exception as e:
+                    await self.log(f"      ⚠ {q_type} error: {e}")
+                
+                # Update progress
+                completed_count = len(uploaded_files)
+                step_progress = 50 + int(completed_count / total_quants * 40)
+                await self.progress(step_progress)
             
             self.end_step("quantize")
             await self.log("")
-            
-            # 4b. Upload all quants at once
-            uploaded_files = []
-            if hf_token and new_repo_id and successful_quants:
-                await self.status("uploading")
-                await self.log("▶ STEP 4b: Uploading all quantized files...")
-                await self.log(f"  Uploading {len(successful_quants)} files...")
-                
-                # Clear transfer progress and set up for upload tracking
-                self.clear_transfer_progress()
-                
-                # Initialize all files as pending
-                for q_type, q_path in successful_quants:
-                    filename = f"{quant_base_name}.{q_type}.gguf"
-                    file_size = q_path.stat().st_size if q_path.exists() else 0
-                    size_str = f"{file_size / (1024**3):.2f}GB" if file_size > 0 else ""
-                    await self.update_transfer_progress(filename, 0, size_str, "Queued", "upload")
-                
-                async def upload_with_progress(q_type, q_path):
-                    """Upload a single file with progress tracking"""
-                    filename = f"{quant_base_name}.{q_type}.gguf"
-                    file_size = q_path.stat().st_size if q_path.exists() else 0
-                    size_str = f"{file_size / (1024**3):.2f}GB" if file_size > 0 else ""
-                    
-                    try:
-                        # Update status to uploading
-                        await self.update_transfer_progress(filename, 0, size_str, "Uploading...", "upload")
-                        
-                        # Run upload in thread pool
-                        loop = asyncio.get_event_loop()
-                        await loop.run_in_executor(
-                            None,
-                            lambda: api.upload_file(
-                                path_or_fileobj=q_path,
-                                path_in_repo=filename,
-                                repo_id=new_repo_id,
-                                repo_type="model"
-                            )
-                        )
-                        
-                        # Mark as complete
-                        await self.update_transfer_progress(filename, 100, size_str, "Complete", "upload")
-                        return (q_type, True, None)
-                    except Exception as e:
-                        await self.update_transfer_progress(filename, -1, size_str, "Failed", "upload")
-                        return (q_type, False, str(e))
-                
-                # Upload files with some concurrency (not too aggressive to avoid rate limits)
-                upload_sem = asyncio.Semaphore(2)  # Max 2 concurrent uploads
-                
-                async def upload_with_semaphore(q_type, q_path):
-                    async with upload_sem:
-                        return await upload_with_progress(q_type, q_path)
-                
-                results = await asyncio.gather(*[
-                    upload_with_semaphore(q_type, q_path) 
-                    for q_type, q_path in successful_quants
-                ])
-                
-                for q_type, success, error in results:
-                    if success:
-                        uploaded_files.append(q_type)
-                        await self.log(f"      ✓ {q_type} uploaded")
-                    else:
-                        await self.log(f"      ⚠ {q_type} upload failed: {error}")
-                
-                # Clear upload progress display
-                self.clear_transfer_progress()
-                await broadcast_transfer_progress(self.model_id, "upload", [])
-                
-                await self.log(f"  ✓ Uploaded {len(uploaded_files)}/{len(successful_quants)} files")
-            elif successful_quants:
-                await self.log(f"  ✓ {len(successful_quants)} quants saved locally (no upload)")
+            await self.log(f"  ✓ Completed {len(uploaded_files)}/{total_quants} quants")
             
             await self.progress(90)
             
             await self.log("")
 
             # 5. Readme
-            if hf_token and uploaded_files and new_repo_id:
+            if self.hf_token and uploaded_files and self.new_repo_id:
                 await self.log("▶ STEP 5: Generating README...")
                 
                 # Get app version (async)
@@ -626,10 +644,10 @@ The following quants are available:
                 loop = asyncio.get_event_loop()
                 await loop.run_in_executor(
                     None,
-                    lambda: api.upload_file(
+                    lambda: self.api.upload_file(
                         path_or_fileobj=readme_content.encode('utf-8'),
                         path_in_repo="README.md",
-                        repo_id=new_repo_id,
+                        repo_id=self.new_repo_id,
                         repo_type="model"
                     )
                 )
@@ -646,8 +664,8 @@ The following quants are available:
             await self.log(f"✓ Total Time: {self.format_duration(timing['total_time'])}")
             if timing["avg_quant_time"] > 0:
                 await self.log(f"✓ Avg Time per Quant: {self.format_duration(timing['avg_quant_time'])}")
-            if new_repo_id:
-                await self.log(f"✓ Uploaded to: https://huggingface.co/{new_repo_id}")
+            if self.new_repo_id:
+                await self.log(f"✓ Uploaded to: https://huggingface.co/{self.new_repo_id}")
             await self._update_db(completed_at=datetime.now())
 
         except Exception as e:

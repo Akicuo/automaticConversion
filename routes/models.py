@@ -3,12 +3,13 @@ Model conversion routes for GGUF Forge.
 """
 import os
 import uuid
+import json
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
 
 from database import get_db_connection
 from models import ProcessRequest
-from workflow import ModelWorkflow, running_workflows
+from workflow import ModelWorkflow, running_workflows, get_quants_list
 from managers import HuggingFaceManager
 
 router = APIRouter(prefix="/api")
@@ -130,3 +131,65 @@ async def terminate_model(model_id: str, user = Depends(get_admin)):
     await workflow.terminate()
     
     return {"status": "terminating", "message": "Termination signal sent. Job will stop shortly."}
+
+
+@router.post("/models/{model_id}/continue")
+async def continue_model(model_id: str, background_tasks: BackgroundTasks, user = Depends(get_admin)):
+    """Admin only: Continue an interrupted job."""
+    conn = await get_db_connection()
+    await conn.execute("SELECT * FROM models WHERE id = ?", (model_id,))
+    model = await conn.fetchone()
+    
+    if not model:
+        await conn.close()
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    # Only allow continuing interrupted jobs
+    if model['status'] != 'interrupted':
+        await conn.close()
+        raise HTTPException(status_code=400, detail=f"Can only continue interrupted jobs. Current status: {model['status']}")
+    
+    # Check if job is already running
+    if model_id in running_workflows:
+        await conn.close()
+        raise HTTPException(status_code=400, detail="Job is already running")
+    
+    # Get the list of completed quants
+    completed_quants = []
+    if model.get('completed_quants'):
+        try:
+            completed_quants = json.loads(model['completed_quants'])
+        except (json.JSONDecodeError, TypeError):
+            completed_quants = []
+    
+    # Calculate remaining quants
+    all_quants = get_quants_list()
+    remaining_quants = [q for q in all_quants if q not in completed_quants]
+    
+    if not remaining_quants:
+        await conn.close()
+        raise HTTPException(status_code=400, detail="All quants already completed for this job")
+    
+    # Reset status and clear error
+    await conn.execute(
+        "UPDATE models SET status = ?, error_details = ?, log = ? WHERE id = ?",
+        ("pending", "", model['log'] + "\n\n━━━ RESUMING JOB ━━━\n", model_id)
+    )
+    await conn.commit()
+    await conn.close()
+    
+    # Start the workflow in resume mode
+    workflow = ModelWorkflow(
+        model_id, 
+        model['hf_repo_id'], 
+        resume_mode=True,
+        completed_quants=completed_quants
+    )
+    background_tasks.add_task(workflow.run_pipeline)
+    
+    return {
+        "status": "continued", 
+        "message": f"Job resumed. {len(completed_quants)} quants already done, {len(remaining_quants)} remaining.",
+        "completed": completed_quants,
+        "remaining": remaining_quants
+    }
