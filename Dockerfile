@@ -15,6 +15,7 @@ ENV PYTHONDONTWRITEBYTECODE=1
 
 # HuggingFace transfer optimizations
 ENV HF_HUB_ENABLE_HF_TRANSFER=1
+ENV HF_XET_HIGH_PERFORMANCE=1
 
 # Working directory
 WORKDIR /app

@@ -43,6 +43,7 @@ services:
       
       # HuggingFace transfer optimization
       - HF_HUB_ENABLE_HF_TRANSFER=1
+      - HF_XET_HIGH_PERFORMANCE=1
     
     # Resource limits (adjust based on your hardware)
     # Quantization is CPU-intensive

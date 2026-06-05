@@ -13,6 +13,10 @@ from pathlib import Path
 from typing import List, Optional
 from concurrent.futures import ThreadPoolExecutor
 
+# Prefer HuggingFace's accelerated transfer backends for large GGUF uploads.
+os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+os.environ.setdefault("HF_XET_HIGH_PERFORMANCE", "1")
+
 from huggingface_hub import HfApi
 
 logger = logging.getLogger("GGUF_Forge")
@@ -30,7 +34,7 @@ _ENV_LLAMA_CPP_DIR: Optional[Path] = None
 _ENV_LLAMA_CPP_REPO: Optional[str] = None
 _ENV_LLAMA_CPP_OUTTYPES: List[str] = []
 
-DEFAULT_LLAMA_CPP_REPO = "https://github.com/ggerganov/llama.cpp"
+DEFAULT_LLAMA_CPP_REPO = "https://github.com/ggml-org/llama.cpp"
 
 # Outtypes that are NOT compact quantizations — selecting one of these is
 # equivalent to today's "FP16 then llama-quantize" flow, not direct-output.
@@ -135,7 +139,13 @@ def _normalize_repo_url(url: str) -> str:
         u = u[:-4]
     if u.endswith("/"):
         u = u[:-1]
-    return u.lower()
+    normalized = u.lower()
+    if normalized.startswith("git@github.com:"):
+        normalized = "https://github.com/" + normalized.split(":", 1)[1]
+    aliases = {
+        "https://github.com/ggerganov/llama.cpp": "https://github.com/ggml-org/llama.cpp",
+    }
+    return aliases.get(normalized, normalized)
 
 
 class LlamaCppManager:
@@ -180,6 +190,17 @@ class LlamaCppManager:
                     f"but configured repo is '{LLAMA_CPP_REPO}'. Resolve manually "
                     f"(delete the folder, change the configured repo, or point LLAMA_CPP_DIR elsewhere)."
                 )
+            if current_origin and current_origin.strip() != LLAMA_CPP_REPO:
+                logger.info(f"Updating llama.cpp origin URL from {current_origin} to {LLAMA_CPP_REPO}")
+                proc = await asyncio.create_subprocess_exec(
+                    "git", "remote", "set-url", "origin", LLAMA_CPP_REPO,
+                    cwd=LLAMA_CPP_DIR,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _, stderr = await proc.communicate()
+                if proc.returncode != 0:
+                    logger.warning(f"Failed to update llama.cpp origin URL: {stderr.decode(errors='replace')}")
 
         if LlamaCppManager.is_installed():
             if force:

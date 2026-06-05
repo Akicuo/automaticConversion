@@ -233,11 +233,13 @@ When these users login via HuggingFace OAuth, they automatically get admin privi
 You can also set these environment variables (they have defaults):
 - `PORT`: Server port (default: 8000)
 - `HOST`: Server host (default: 0.0.0.0)
+- `LLAMA_CPP_REPO`: Git repository used for llama.cpp (default: `https://github.com/ggml-org/llama.cpp`)
 - `LLAMA_CPP_DIR`: Path to llama.cpp directory (default: `./llama.cpp`)
   - Can be **relative** (e.g., `../llama.cpp`, `custom/llama.cpp`) or **absolute** (e.g., `/opt/llama.cpp`, `C:\tools\llama.cpp`)
   - Relative paths are resolved from the project root directory
   - Useful if you want to share a single llama.cpp installation across multiple projects
   - Example: `LLAMA_CPP_DIR=/opt/llama.cpp` or `LLAMA_CPP_DIR=../shared/llama.cpp`
+- HuggingFace upload acceleration is enabled by default with `HF_HUB_ENABLE_HF_TRANSFER=1` and `HF_XET_HIGH_PERFORMANCE=1`
 - `PARALLEL_QUANT_JOBS`: Number of simultaneous quantization jobs (default: 2)
   - `1` = Sequential (slowest, safest for RAM)
   - `2` = Default (balanced)
@@ -633,7 +635,7 @@ automaticConversion/
 MIT
 
 ## Credits
-- [llama.cpp](https://github.com/ggerganov/llama.cpp) - GGUF quantization
+- [llama.cpp](https://github.com/ggml-org/llama.cpp) - GGUF quantization
 - [HuggingFace](https://huggingface.co) - Model hosting and OAuth
 - [FastAPI](https://fastapi.tiangolo.com/) - Web framework
 - [pyodbc](https://github.com/mkleehammer/pyodbc) - MSSQL connectivity

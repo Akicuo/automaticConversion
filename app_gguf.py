@@ -20,6 +20,12 @@ from dotenv import load_dotenv
 
 # --- Configuration & Setup ---
 load_dotenv()
+
+# Enable HuggingFace's accelerated upload backends by default. These must be set
+# before huggingface_hub is imported anywhere in the app.
+os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+os.environ.setdefault("HF_XET_HIGH_PERFORMANCE", "1")
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("GGUF_Forge")
 
@@ -96,7 +102,7 @@ else:
 
 # Llama.cpp source repository - configurable via LLAMA_CPP_REPO environment variable
 # Lets users point GGUF Forge at a fork (e.g. one with extra model support).
-LLAMA_CPP_REPO = os.getenv("LLAMA_CPP_REPO", "").strip() or "https://github.com/ggerganov/llama.cpp"
+LLAMA_CPP_REPO = os.getenv("LLAMA_CPP_REPO", "").strip() or "https://github.com/ggml-org/llama.cpp"
 
 # Fork-specific compact GGUF outtypes — comma-separated list (e.g. "iq2_xxs,q8_0").
 # Used as the env-level fallback; the admin UI persists per-fork values in the DB.

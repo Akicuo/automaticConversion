@@ -12,6 +12,9 @@ from typing import List, Optional, Tuple
 from pathlib import Path
 from datetime import datetime
 
+# Prefer HuggingFace's accelerated transfer backends for large GGUF uploads.
+os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+os.environ.setdefault("HF_XET_HIGH_PERFORMANCE", "1")
 
 from huggingface_hub import HfApi, snapshot_download, create_repo, hf_hub_download
 from huggingface_hub.utils import tqdm as hf_tqdm
@@ -828,7 +831,7 @@ Great news! Your requested GGUF conversion is now complete!
 
 ## What's Next?
 - Download your preferred quantization from the [Files tab](https://huggingface.co/{self.new_repo_id}/tree/main)
-- Use with [llama.cpp](https://github.com/ggerganov/llama.cpp), [Ollama](https://ollama.ai/), or any GGUF-compatible inference engine
+- Use with [llama.cpp](https://github.com/ggml-org/llama.cpp), [Ollama](https://ollama.ai/), or any GGUF-compatible inference engine
 - Star the repo if you find it useful! ⭐
 
 ---
@@ -1367,6 +1370,13 @@ Great news! Your requested GGUF conversion is now complete!
 
             # Get current user's HuggingFace username to create repo under their account
             self.api = HfApi(token=self.hf_token)
+            if self.hf_token:
+                transfer_modes = []
+                if os.getenv("HF_HUB_ENABLE_HF_TRANSFER") == "1":
+                    transfer_modes.append("hf_transfer")
+                if os.getenv("HF_XET_HIGH_PERFORMANCE") == "1":
+                    transfer_modes.append("hf_xet high-performance")
+                await self.log(f"  HF transfer acceleration: {', '.join(transfer_modes) if transfer_modes else 'default'}")
 
             # Local-only mode: prepare output directory inside the source folder, skip HF upload
             local_output_dir = None
@@ -1424,7 +1434,26 @@ Great news! Your requested GGUF conversion is now complete!
                 # User requested specific quants
                 await self.log(f"  📋 Custom quants requested: {', '.join(self.quants_to_run)}")
                 await self.log("")
-            
+
+            uploaded_files_lock = asyncio.Lock()
+            readme_update_lock = asyncio.Lock()
+
+            async def remember_completed_quant(q_type: str, *, save_resume: bool = False, update_readme: bool = False):
+                """Track a finished quant and optionally refresh the repo README immediately."""
+                async with uploaded_files_lock:
+                    if q_type not in uploaded_files:
+                        uploaded_files.append(q_type)
+
+                if save_resume:
+                    await self.save_completed_quant(q_type)
+
+                if update_readme and self.hf_token and self.new_repo_id:
+                    async with readme_update_lock:
+                        self.check_terminated()
+                        async with uploaded_files_lock:
+                            snapshot = list(uploaded_files)
+                        await self.upload_status_readme(quant_base_name, snapshot)
+
             if self.hf_token and self.new_repo_id:
                 await self.status("uploading")
                 await self.upload_status_readme(quant_base_name, uploaded_files)
@@ -1569,8 +1598,7 @@ Great news! Your requested GGUF conversion is now complete!
                                     None, lambda: shutil.move(str(q_path), str(target_path))
                                 )
                                 await self.log(f"      ✓ {q_type} Saved locally: {target_path}")
-                                uploaded_files.append(q_type)
-                                await self.save_completed_quant(q_type)
+                                await remember_completed_quant(q_type, save_resume=True)
                             except Exception as e:
                                 await self.log(f"      ⚠ {q_type} Failed to move to local output: {e}")
                                 return
@@ -1601,10 +1629,9 @@ Great news! Your requested GGUF conversion is now complete!
 
                             await self.update_transfer_progress(filename, 100, size_str, "Complete", "upload")
                             await self.log(f"      ✓ {q_type} Uploaded to HuggingFace")
-                            uploaded_files.append(q_type)
 
-                            # Save progress to DB for resume capability
-                            await self.save_completed_quant(q_type)
+                            # Save progress for resume and refresh README so the repo shows each new quant immediately.
+                            await remember_completed_quant(q_type, save_resume=True, update_readme=True)
 
                             # === DELETE QUANT FILE (only after successful upload) ===
                             try:
@@ -1614,7 +1641,7 @@ Great news! Your requested GGUF conversion is now complete!
                                 await self.log(f"      ⚠ {q_type} Failed to delete: {e}")
                         else:
                             await self.log(f"      ℹ {q_type} Skipping upload (no HF token)")
-                            uploaded_files.append(q_type)
+                            await remember_completed_quant(q_type)
                             try:
                                 loop = asyncio.get_event_loop()
                                 await loop.run_in_executor(None, lambda: q_path.unlink(missing_ok=True))
@@ -1746,7 +1773,7 @@ Full Ollama support is provided by merging any sharded GGUF output into a single
 
  - 🌐 **Free Hosted Service**: [gguforge.com](https://gguforge.com)
  - 🛠️ Self-host GGUF Forge: [GitHub](https://github.com/Akicuo/automaticConversion)
- - 📦 llama.cpp (quantization engine): [GitHub](https://github.com/ggerganov/llama.cpp)
+ - 📦 llama.cpp (quantization engine): [GitHub](https://github.com/ggml-org/llama.cpp)
  - 💬 Community & Support: [Discord](https://discord.gg/4vafUgVX3a)
 
 
