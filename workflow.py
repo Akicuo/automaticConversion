@@ -672,6 +672,22 @@ class ModelWorkflow:
             await self.log(f"      ⚠ {q_type} Output file missing: {q_path.name}")
             return None
 
+        # If the current run produced a valid unsharded output AND it is at least
+        # as fresh as every detected shard, treat the shards as stale leftovers
+        # from a previous run and prefer the single-file output. Otherwise the
+        # missing-shard branch below would silently skip the upload step.
+        if q_path.exists() and q_path.stat().st_size > 0:
+            try:
+                base_mtime = q_path.stat().st_mtime
+                latest_shard_mtime = max(p.stat().st_mtime for _, _, p in shards)
+                if base_mtime >= latest_shard_mtime:
+                    await self.log(
+                        f"      ℹ {q_type} Using unsharded output (ignoring {len(shards)} stale shard(s))"
+                    )
+                    return q_path
+            except Exception:
+                pass
+
         total = shards[0][1]
         shard_paths = [path for _, _, path in shards]
         shard_indices = {idx for idx, _, _ in shards}
@@ -680,7 +696,11 @@ class ModelWorkflow:
         if missing:
             preview = ", ".join(f"{i:05d}" for i in missing[:5])
             suffix = "..." if len(missing) > 5 else ""
-            await self.log(f"      ⚠ {q_type} Shard set incomplete (missing {preview}{suffix})")
+            seen = ", ".join(sorted(p.name for _, _, p in shards)[:5])
+            seen_suffix = "..." if len(shards) > 5 else ""
+            await self.log(
+                f"      ⚠ {q_type} Shard set incomplete (missing {preview}{suffix}; saw {seen}{seen_suffix})"
+            )
             return None
 
         # Check if shard merging is disabled
@@ -1548,6 +1568,18 @@ Great news! Your requested GGUF conversion is now complete!
                                 f"      ✓ {q_type} ready from direct convert ({self.format_duration(quant_duration)})"
                             )
                         else:
+                            # Sweep any stale shards or partial output from a previous
+                            # run so ensure_unsharded_gguf() below only sees fresh output.
+                            # Without this, a lingering "<base>.<q>-00001-of-00002.gguf"
+                            # from an aborted run causes the merge path to fire, fail,
+                            # and silently skip the upload step for this quant.
+                            try:
+                                for _, _, shard_path in self._get_gguf_shards(q_path):
+                                    shard_path.unlink(missing_ok=True)
+                                q_path.unlink(missing_ok=True)
+                            except Exception as e:
+                                await self.log(f"      ⚠ {q_type} Failed to sweep stale output: {e}")
+
                             # === QUANTIZE ===
                             env = os.environ.copy()
                             if quantize_bin and quantize_bin.parent:
